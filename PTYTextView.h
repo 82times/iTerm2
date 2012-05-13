@@ -37,8 +37,8 @@
 #include <sys/time.h>
 #define PRETTY_BOLD
 
-#define MARGIN  5
-#define VMARGIN 2
+#define MARGIN  20
+#define VMARGIN 20
 #define COLOR_KEY_SIZE 4
 
 @class VT100Screen;
