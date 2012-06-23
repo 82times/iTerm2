@@ -757,7 +757,6 @@ static VT100TCC decode_xterm(unsigned char *datap,
     int mode = 0;
     VT100TCC result;
     NSData *data;
-    BOOL unrecognized = NO;
     char s[MAX_BUFFER_LENGTH] = { 0 }, *c = nil;
 
     assert(datap != NULL);
@@ -784,18 +783,18 @@ static VT100TCC decode_xterm(unsigned char *datap,
     }
     if (datalen > 0) {
         if (*datap != ';' && *datap != 'P') {
-            unrecognized = YES;
+            // Bogus first char after "esc ]". Consume only those two chars.
+            result.type = VT100_NOTSUPPORT;
+            return result;
         }
         if (*datap == 'P') {
             mode = -1;
         }
         BOOL str_end = NO;
         c = s;
-        if (!unrecognized) {
-            datalen--;
-            datap++;
-            (*rmlen)++;
-        }
+        datalen--;
+        datap++;
+        (*rmlen)++;
         // Search for the end of a ^G/ST terminated string (but see the note below about other ways to terminate it).
         while (*datap != 7 && datalen > 0) {
             // Technically, only ^G or esc + \ ought to terminate a string. But sometimes an application is buggy and it forgets to terminate it.
@@ -838,9 +837,7 @@ static VT100TCC decode_xterm(unsigned char *datap,
         *rmlen=0;
     }
 
-    if (unrecognized) {
-        result.type = VT100_NOTSUPPORT;
-    } else if (!(*rmlen)) {
+    if (!(*rmlen)) {
         result.type = VT100_WAIT;
     } else {
         data = [NSData dataWithBytes:s length:c-s];
@@ -2315,7 +2312,7 @@ static VT100TCC decode_string(unsigned char *datap,
 
 - (char *)mouseReport:(int)button atX:(int)x Y:(int)y
 {
-    static char buf[32]; // This should be enough for all formats.
+    static char buf[64]; // This should be enough for all formats.
     switch (MOUSE_FORMAT) {
         case MOUSE_FORMAT_XTERM_EXT:
             snprintf(buf, sizeof(buf), "\033[M%c%lc%lc",
@@ -2325,6 +2322,18 @@ static VT100TCC decode_string(unsigned char *datap,
             break;
         case MOUSE_FORMAT_URXVT:
             snprintf(buf, sizeof(buf), "\033[%d;%d;%dM", 32 + button, x, y);
+            break;
+        case MOUSE_FORMAT_SGR:
+            if (button & MOUSE_BUTTON_SGR_RELEASE_FLAG) {
+                // for mouse release event
+                snprintf(buf, sizeof(buf), "\033[<%d;%d;%dm", 
+                         button ^ MOUSE_BUTTON_SGR_RELEASE_FLAG, 
+                         x, 
+                         y);
+            } else {
+                // for mouse press/motion event
+                snprintf(buf, sizeof(buf), "\033[<%d;%d;%dM", button, x, y);            
+            }
             break;
         case MOUSE_FORMAT_XTERM:
         default:
@@ -2336,30 +2345,49 @@ static VT100TCC decode_string(unsigned char *datap,
 
 - (NSData *)mousePress:(int)button withModifiers:(unsigned int)modflag atX:(int)x Y:(int)y
 {
-    char cb;
+    int cb;
 
     cb = button;
-    if (button > 3) cb += 64 - 4; // Subtract 4 for scroll wheel buttons
-    if (modflag & NSControlKeyMask) cb += 16;
-    if (modflag & NSShiftKeyMask) cb += 4;
-    if (modflag & NSAlternateKeyMask) cb += 8;
-    char *buf = [self mouseReport:(cb) atX:(x + 1) Y:(y + 1)];
+    if (button == MOUSE_BUTTON_SCROLLDOWN || button == MOUSE_BUTTON_SCROLLUP) {
+        // convert x11 scroll button number to terminal button code
+        const int offset = MOUSE_BUTTON_SCROLLDOWN;
+        cb -= offset;
+        cb |= MOUSE_BUTTON_SCROLL_FLAG;
+    }
+    if (modflag & NSControlKeyMask) {
+        cb |= MOUSE_BUTTON_CTRL_FLAG;
+    }
+    if (modflag & NSShiftKeyMask) {
+        cb |= MOUSE_BUTTON_SHIFT_FLAG;
+    }
+    if (modflag & NSAlternateKeyMask) {
+        cb |= MOUSE_BUTTON_META_FLAG;
+    }
+    char *buf = [self mouseReport:cb atX:(x + 1) Y:(y + 1)];
 
     return [NSData dataWithBytes: buf length: strlen(buf)];
 }
 
-- (NSData *)mouseReleaseWithModifiers:(unsigned int)modflag atX:(int)x Y:(int)y
+- (NSData *)mouseRelease:(int)button withModifiers:(unsigned int)modflag atX:(int)x Y:(int)y
 {
-    char cb = 3;
+    int cb;
+    
+    if (MOUSE_FORMAT == MOUSE_FORMAT_SGR) {
+        // for SGR 1006 mode
+        cb = button | MOUSE_BUTTON_SGR_RELEASE_FLAG;
+    } else {
+        // for 1000/1005/1015 mode
+        cb = 3;
+    }
 
     if (modflag & NSControlKeyMask) {
-      cb |= 16;
+        cb |= MOUSE_BUTTON_CTRL_FLAG;
     }
     if (modflag & NSShiftKeyMask) {
-      cb |= 4;
+        cb |= MOUSE_BUTTON_SHIFT_FLAG;
     }
     if (modflag & NSAlternateKeyMask) {
-      cb |= 8;
+        cb |= MOUSE_BUTTON_META_FLAG;
     }
     char *buf = [self mouseReport:cb atX:(x + 1) Y:(y + 1)];
 
@@ -2368,20 +2396,20 @@ static VT100TCC decode_string(unsigned char *datap,
 
 - (NSData *)mouseMotion:(int)button withModifiers:(unsigned int)modflag atX:(int)x Y:(int)y
 {
-    char cb;
+    int cb;
 
     cb = button % 3;
     if (button > 3) {
-      cb |= 64;
+        cb |= MOUSE_BUTTON_SCROLL_FLAG;
     }
     if (modflag & NSControlKeyMask) {
-      cb |= 16;
+        cb |= MOUSE_BUTTON_CTRL_FLAG;
     }
     if (modflag & NSShiftKeyMask) {
-      cb |= 4;
+        cb |= MOUSE_BUTTON_SHIFT_FLAG;
     }
     if (modflag & NSAlternateKeyMask) {
-      cb |= 8;
+        cb |= MOUSE_BUTTON_META_FLAG;
     }
     char *buf = [self mouseReport:(32 + cb) atX:(x + 1) Y:(y + 1)];
 
@@ -2643,6 +2671,15 @@ static VT100TCC decode_string(unsigned char *datap,
                     }
                     break;
 
+                    
+                case 1006:
+                    if (mode) {
+                        MOUSE_FORMAT = MOUSE_FORMAT_SGR;
+                    } else {
+                        MOUSE_FORMAT = MOUSE_FORMAT_XTERM;
+                    }
+                    break;
+                
                 case 1015:
                     if (mode) {
                         MOUSE_FORMAT = MOUSE_FORMAT_URXVT;
