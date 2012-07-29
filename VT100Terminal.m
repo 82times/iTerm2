@@ -734,8 +734,8 @@ static VT100TCC decode_underscore(unsigned char *datap,
         }
 
         if (found && [result.u.string hasPrefix:@"tmux"]) {
-            if ([result.u.string isEqualToString:@"tmux1.0"] ||
-                [result.u.string hasPrefix:@"tmux1.0;"]) {
+            if ([result.u.string isEqualToString:@"tmux0.5"] ||
+                [result.u.string hasPrefix:@"tmux0.5;"]) {
                 result.type = UNDERSCORE_TMUX1;
             } else if ([result.u.string hasPrefix:@"tmux"]) {
                 result.type = UNDERSCORE_TMUX_UNSUPPORTED;
@@ -781,20 +781,23 @@ static VT100TCC decode_xterm(unsigned char *datap,
         }
         mode = n;
     }
+    BOOL unrecognized = NO;
     if (datalen > 0) {
         if (*datap != ';' && *datap != 'P') {
-            // Bogus first char after "esc ]". Consume only those two chars.
-            result.type = VT100_NOTSUPPORT;
-            return result;
-        }
-        if (*datap == 'P') {
-            mode = -1;
+	    // Bogus first char after "esc ] [number]". Consume up to and
+	    // including terminator and then return VT100_NOTSUPPORT.
+            unrecognized = YES;
+        } else {
+            if (*datap == 'P') {
+                mode = -1;
+            }
+            // Consume ';' or 'P'.
+            datalen--;
+            datap++;
+            (*rmlen)++;
         }
         BOOL str_end = NO;
         c = s;
-        datalen--;
-        datap++;
-        (*rmlen)++;
         // Search for the end of a ^G/ST terminated string (but see the note below about other ways to terminate it).
         while (*datap != 7 && datalen > 0) {
             // Technically, only ^G or esc + \ ought to terminate a string. But sometimes an application is buggy and it forgets to terminate it.
@@ -839,6 +842,9 @@ static VT100TCC decode_xterm(unsigned char *datap,
 
     if (!(*rmlen)) {
         result.type = VT100_WAIT;
+    } else if (unrecognized) {
+        // Found terminator but it's malformed.
+        result.type = VT100_NOTSUPPORT;
     } else {
         data = [NSData dataWithBytes:s length:c-s];
         result.u.string = [[[NSString alloc] initWithData:data
@@ -2828,6 +2834,7 @@ static VT100TCC decode_string(unsigned char *datap,
 {
     if (token.type == XTERMCC_SET_RGB) {
         // The format of this command is "<index>;rgb:<redhex>/<greenhex>/<bluehex>", e.g. "105;rgb:00/cc/ff"
+        // TODO(georgen): xterm has extended this quite a bit and we're behind. Catch up.
         const char *s = [token.u.string UTF8String];
         int theIndex = 0;
         while (isdigit(*s)) {
@@ -2865,8 +2872,10 @@ static VT100TCC decode_string(unsigned char *datap,
         while (isxdigit(*s)) {
             b = 16*b + (*s>='a' ? *s++ - 'a' + 10 : *s>='A' ? *s++ - 'A' + 10 : *s++ - '0');
         }
-        if (theIndex >= 16 && theIndex <= 255 && // ignore assigns to the systems colors or outside the palette
-             r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) { // ignore bad colors
+        if (theIndex >= 0 && theIndex <= 255 &&
+            r >= 0 && r <= 255 &&
+            g >= 0 && g <= 255 &&
+            b >= 0 && b <= 255) {
             [[SCREEN session] setColorTable:theIndex
                                               color:[NSColor colorWithCalibratedRed:r/256.0 green:g/256.0 blue:b/256.0 alpha:1]];
         }
