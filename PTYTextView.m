@@ -1214,9 +1214,12 @@ NSMutableArray* screens=0;
         NSPoint position = [(NSValue*)parameter pointValue];
         int x = position.x / charWidth;
         NSRect myFrame = [self frame];
-        myFrame.size.height = 0;
         int y = (myFrame.size.height - position.y) / lineHeight;
-        return [NSValue valueWithRange:[self _rangeOfCharAtX:x y:y]];
+        if (y < 0) {
+            return [NSValue valueWithRange:NSMakeRange(0, 0)];
+        } else {
+            return [NSValue valueWithRange:[self _rangeOfCharAtX:x y:y]];
+        }
     } else if ([attribute isEqualToString:NSAccessibilityRangeForIndexParameterizedAttribute]) {
         //(NSValue *)  - (rangeValue) composed char range; param:(NSNumber *)
         NSUInteger theIndex = [(NSNumber*)parameter unsignedLongValue];
@@ -1239,10 +1242,10 @@ NSMutableArray* screens=0;
         int xMax = MAX(xStart, x2);
         NSRect myFrame = [self frame];
         myFrame.size.height = 0;
-        NSRect result = NSMakeRect(xMin * charWidth,
-                                   myFrame.size.height - yMin * lineHeight,
-                                   (xMax - xMin + 1) * charWidth,
-                                   (yMax - yMin + 1) * lineHeight);
+        NSRect result = NSMakeRect(MAX(0, xMin * charWidth),
+                                   MAX(0, myFrame.size.height - yMin * lineHeight),
+                                   MAX(0, (xMax - xMin + 1) * charWidth),
+                                   MAX(0, (yMax - yMin + 1) * lineHeight));
         return [NSValue valueWithRect:result];
     } else {
         return [super accessibilityAttributeValue:attribute forParameter:parameter];
@@ -1309,12 +1312,12 @@ NSMutableArray* screens=0;
     return allText_;
 }
 
-- (id)accessibilityAttributeValue:(NSString *)attribute
+- (id)_accessibilityAttributeValue:(NSString *)attribute
 {
     if ([attribute isEqualToString:NSAccessibilityRoleAttribute]) {
         return NSAccessibilityTextAreaRole;
     } else if ([attribute isEqualToString:NSAccessibilityRoleDescriptionAttribute]) {
-        return NSAccessibilityRoleDescriptionForUIElement(NSAccessibilityTextAreaRole);
+        return @"Terminal window";
     } else if ([attribute isEqualToString:NSAccessibilityHelpAttribute]) {
         return nil;
     } else if ([attribute isEqualToString:NSAccessibilityFocusedAttribute]) {
@@ -1347,6 +1350,11 @@ NSMutableArray* screens=0;
     } else {
         return [super accessibilityAttributeValue:attribute];
     }
+}
+
+- (id)accessibilityAttributeValue:(NSString *)attribute {
+    id result = [self _accessibilityAttributeValue:attribute];
+    return result;
 }
 
 - (BOOL)_isCursorBlinking
@@ -3135,7 +3143,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         DLog(@"is a click in the window");
 
         BOOL altPressed = ([event modifierFlags] & NSAlternateKeyMask) != 0;
-        if (altPressed && !cmdPressed) {
+        if (altPressed && !cmdPressed && ![[self delegate] xtermMouseReporting]) {
             [self placeCursorOnCurrentLineWithEvent:event];
         }
 
@@ -3599,7 +3607,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (void)placeCursorOnCurrentLineWithEvent:(NSEvent *)event
 {
     BOOL debugKeyDown = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DebugKeyDown"] boolValue];
-    
+
     if (debugKeyDown) {
         NSLog(@"PTYTextView placeCursorOnCurrentLineWithEvent BEGIN %@", event);
     }
@@ -6077,6 +6085,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                  color, NSForegroundColorAttributeName,
                  nil];
     }
+    NSGraphicsContext *ctx = [NSGraphicsContext currentContext];
+    [ctx saveGraphicsState];
+    [ctx setCompositingOperation:NSCompositeSourceOver];
     NSMutableAttributedString* attributedString = [[[NSMutableAttributedString alloc] initWithString:str
                                                                                           attributes:attrs] autorelease];
     // Note that drawInRect doesn't use the right baseline, but drawWithRect
@@ -6109,6 +6120,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                                   lineHeight)
                                options:0];  // NSStringDrawingUsesLineFragmentOrigin
     }
+    [ctx restoreGraphicsState];
 }
 
 - (void)_drawComplexCharRun:(CharRun *)currentRun
@@ -6447,6 +6459,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 }
             }
             if (!hasBGImage ||
+                (isMatch && !bgselected) ||
                 !(bgColor == ALTSEM_BG_DEFAULT && bgAlt) ||
                 bgselected) {
                 // There's no bg image, or there's a nondefault bg on a bg image.
