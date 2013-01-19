@@ -375,10 +375,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     if (state) {
         [[aSession SCREEN] setTmuxState:state];
 		NSString *pendingOutput = [state objectForKey:@"pending_output"];
-		if (pendingOutput) {
-			NSData *data = [pendingOutput dataFromHexValues];
-			[[aSession TERMINAL] putStreamData:data];
-		}
+        if (pendingOutput && [pendingOutput length]) {
+            NSData *data = [pendingOutput dataFromHexValues];
+            [[aSession TERMINAL] putStreamData:data];
+        }
         [[aSession TERMINAL] setInsertMode:[[state objectForKey:kStateDictInsertMode] boolValue]];
         [[aSession TERMINAL] setCursorMode:[[state objectForKey:kStateDictKCursorMode] boolValue]];
         [[aSession TERMINAL] setKeypadMode:[[state objectForKey:kStateDictKKeypadMode] boolValue]];
@@ -683,7 +683,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 }
 
 - (BOOL)shouldSetCtype {
-    return ![[NSUserDefaults standardUserDefaults] boolForKey:@"DoNotSetCtype"];
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"SetCtype"];
 }
 
 - (void)startProgram:(NSString *)program
@@ -865,10 +865,15 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
         debugKeyDown = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DebugKeyDown"] boolValue];
         checkedDebug = YES;
     }
-    if (debugKeyDown) {
+    if (debugKeyDown || gDebugLogging) {
         const char *bytes = [data bytes];
         for (int i = 0; i < [data length]; i++) {
-            NSLog(@"writeTask keydown %d: %d (%c)", i, (int) bytes[i], bytes[i]);
+            if (debugKeyDown) {
+                NSLog(@"writeTask keydown %d: %d (%c)", i, (int) bytes[i], bytes[i]);
+            }
+            if (gDebugLogging) {
+                DebugLog([NSString stringWithFormat:@"writeTask keydown %d: %d (%c)", i, (int) bytes[i], bytes[i]]);
+            }
         }
     }
 
@@ -910,7 +915,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
                                        alternateButton:@"Cancel"
                                            otherButton:nil
                              informativeTextWithFormat:@""];
-        NSTextField *tmuxCommand = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+        NSTextField *tmuxCommand = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)] autorelease];
         [tmuxCommand setEditable:YES];
         [tmuxCommand setSelectable:YES];
         [alert setAccessoryView:tmuxCommand];
@@ -1743,10 +1748,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
             if (data != nil) {
                 send_str = (unsigned char *)[data bytes];
                 send_strlen = [data length];
-                DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %d; send_str[0] = '%c (0x%x)'",
-                          modflag, send_strlen, send_str[0]]);
+                DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %zd; send_str[0] = '%c (0x%x)'",
+                          modflag, send_strlen, send_str[0], send_str[0]]);
                 if (debugKeyDown) {
-                    DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %d; send_str[0] = '%c (0x%x)'",
+                    DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %zd; send_str[0] = '%c (0x%x)'",
                               modflag, send_strlen, send_str[0], send_str[0]]);
                 }
             }
@@ -2894,7 +2899,6 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 	[TEXTVIEW updateCursor:[NSApp currentEvent]];
 }
 
-
 - (BOOL)logging
 {
     return [SHELL logging];
@@ -3238,7 +3242,9 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     }
     [TEXTVIEW setFont:font nafont:nafont horizontalSpacing:horizontalSpacing verticalSpacing:verticalSpacing];
     if (![[[self tab] parentWindow] anyFullScreen]) {
-        [[[self tab] parentWindow] fitWindowToTab:[self tab]];
+        if ([[PreferencePanel sharedInstance] adjustWindowForFontSizeChange]) {
+            [[[self tab] parentWindow] fitWindowToTab:[self tab]];
+        }
     }
     // If the window isn't able to adjust, or adjust enough, make the session
     // work with whatever size we ended up having.
@@ -3632,8 +3638,8 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     tmuxController_ = [[TmuxController alloc] initWithGateway:tmuxGateway_];
 	NSSize theSize;
 	Profile *tmuxBookmark = [PTYTab tmuxBookmark];
-	theSize.width = [[tmuxBookmark objectForKey:KEY_COLUMNS] intValue];
-	theSize.height = [[tmuxBookmark objectForKey:KEY_ROWS] intValue];
+	theSize.width = MAX(1, [[tmuxBookmark objectForKey:KEY_COLUMNS] intValue]);
+	theSize.height = MAX(1, [[tmuxBookmark objectForKey:KEY_ROWS] intValue]);
 	[tmuxController_ setClientSize:theSize];
 
     [self printTmuxMessage:@"** tmux mode started **"];

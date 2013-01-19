@@ -249,7 +249,7 @@ const int kInterWidgetMargin = 10;
 
     starColumn_ = [[NSTableColumn alloc] initWithIdentifier:@"default"];
     [starColumn_ setEditable:NO];
-    [starColumn_ setDataCell:[[NSImageCell alloc] initImageCell:nil]];
+    [starColumn_ setDataCell:[[[NSImageCell alloc] initImageCell:nil] autorelease]];
     [starColumn_ setWidth:34];
     [tableView_ addTableColumn:starColumn_];
 
@@ -266,7 +266,7 @@ const int kInterWidgetMargin = 10;
 
     [tableView_ setDoubleAction:@selector(onDoubleClick:)];
 
-    NSTableHeaderView* header = [[NSTableHeaderView alloc] init];
+    NSTableHeaderView* header = [[[NSTableHeaderView alloc] init] autorelease];
     [tableView_ setHeaderView:header];
     [[tableColumn_ headerCell] setStringValue:@"Name"];
     [[starColumn_ headerCell] setStringValue:@"Default"];
@@ -394,13 +394,10 @@ const int kInterWidgetMargin = 10;
             return @"";
         }
     } else if (aTableColumn == starColumn_) {
-        // FIXME: use imageNamed and clean up drawing code
+        // FIXME: clean up drawing code
         static NSImage* starImage;
         if (!starImage) {
-            NSString* starFile = [[NSBundle bundleForClass:[self class]]
-                                  pathForResource:@"star-gold24"
-                                  ofType:@"png"];
-            starImage = [[NSImage alloc] initWithContentsOfFile:starFile];
+            starImage = [[NSImage imageNamed:@"star"] retain];
         }
         NSImage *image = [[[NSImage alloc] init] autorelease];
         NSSize size;

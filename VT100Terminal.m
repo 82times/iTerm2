@@ -146,23 +146,23 @@ typedef struct {
 } CSIParam;
 
 // functions
-static BOOL isCSI(unsigned char *, size_t);
-static BOOL isXTERM(unsigned char *, size_t);
+static BOOL isCSI(unsigned char *, int);
+static BOOL isXTERM(unsigned char *, int);
 static BOOL isString(unsigned char *, NSStringEncoding);
-static size_t getCSIParam(unsigned char *, size_t, CSIParam *, VT100Screen *);
-static VT100TCC decode_csi(unsigned char *, size_t, size_t *,VT100Screen *);
-static VT100TCC decode_xterm(unsigned char *, size_t, size_t *,NSStringEncoding);
-static VT100TCC decode_ansi(unsigned char *,size_t, size_t *,VT100Screen *);
-static VT100TCC decode_other(unsigned char *, size_t, size_t *, NSStringEncoding);
-static VT100TCC decode_control(unsigned char *, size_t, size_t *,NSStringEncoding,VT100Screen *);
-static int decode_utf8_char(unsigned char *, size_t, unsigned int *);
-static VT100TCC decode_utf8(unsigned char *, size_t, size_t *);
-static VT100TCC decode_euccn(unsigned char *, size_t, size_t *);
-static VT100TCC decode_big5(unsigned char *,size_t, size_t *);
-static VT100TCC decode_string(unsigned char *, size_t, size_t *,
+static int getCSIParam(unsigned char *, int, CSIParam *, VT100Screen *);
+static VT100TCC decode_csi(unsigned char *, int, int *,VT100Screen *);
+static VT100TCC decode_xterm(unsigned char *, int, int *,NSStringEncoding);
+static VT100TCC decode_ansi(unsigned char *,int, int *,VT100Screen *);
+static VT100TCC decode_other(unsigned char *, int, int *, NSStringEncoding);
+static VT100TCC decode_control(unsigned char *, int, int *,NSStringEncoding,VT100Screen *);
+static int decode_utf8_char(unsigned char *, int, int *);
+static VT100TCC decode_utf8(unsigned char *, int, int *);
+static VT100TCC decode_euccn(unsigned char *, int, int *);
+static VT100TCC decode_big5(unsigned char *,int, int *);
+static VT100TCC decode_string(unsigned char *, int, int *,
                               NSStringEncoding);
 
-static BOOL isCSI(unsigned char *code, size_t len)
+static BOOL isCSI(unsigned char *code, int len)
 {
     if (len >= 2 && code[0] == ESC && (code[1] == '[')) {
         return YES;
@@ -170,14 +170,14 @@ static BOOL isCSI(unsigned char *code, size_t len)
     return NO;
 }
 
-static BOOL isXTERM(unsigned char *code, size_t len)
+static BOOL isXTERM(unsigned char *code, int len)
 {
     if (len >= 2 && code[0] == ESC && (code[1] == ']'))
         return YES;
     return NO;
 }
 
-static BOOL isANSI(unsigned char *code, size_t len)
+static BOOL isANSI(unsigned char *code, int len)
 {
     // Currently, we only support esc-c as an ANSI code (other ansi codes are CSI).
     if (len >= 2 && code[0] == ESC && code[1] == 'c') {
@@ -186,7 +186,7 @@ static BOOL isANSI(unsigned char *code, size_t len)
     return NO;
 }
 
-static BOOL isUNDERSCORE(unsigned char *code, size_t len)
+static BOOL isUNDERSCORE(unsigned char *code, int len)
 {
     if (len >= 2 && code[0] == ESC && code[1] == '_') {
         return YES;
@@ -232,9 +232,9 @@ static BOOL isString(unsigned char *code,
     return result;
 }
 
-static size_t getCSIParam(unsigned char *datap,
-                          size_t datalen,
-                          CSIParam *param, VT100Screen *SCREEN)
+static int getCSIParam(unsigned char *datap,
+                       int datalen,
+                       CSIParam *param, VT100Screen *SCREEN)
 {
     int i;
     BOOL unrecognized=NO;
@@ -377,6 +377,25 @@ static size_t getCSIParam(unsigned char *datap,
             }
             break;
         }
+        else if (*datap == '!') {
+            datap++;
+            datalen--;
+            if (datalen == 0) {
+                return -1;
+            }
+            switch (*datap) {
+                case 'p':
+                    param->cmd = MAKE_CSI_COMMAND('!', 'p');
+                    datap++;
+                    datalen--;
+                    return datap - orgp;
+                default:
+                    datap++;
+                    datalen--;
+                    param->cmd=0xff;
+                    break;
+            }
+        }
         else {
             switch (*datap) {
                 case VT100CC_ENQ: break;
@@ -400,8 +419,7 @@ static size_t getCSIParam(unsigned char *datap,
                     unrecognized=YES;
                     break;
             }
-            if(unrecognized == NO)
-            {
+            if (unrecognized == NO) {
                 datalen--;
                 datap++;
             }
@@ -416,8 +434,8 @@ static size_t getCSIParam(unsigned char *datap,
  ((pm).count  = (pm).count > (n) + 1 ? (pm).count : (n) + 1 ))
 
 static VT100TCC decode_ansi(unsigned char *datap,
-                            size_t datalen,
-                            size_t *rmlen,
+                            int datalen,
+                            int *rmlen,
                             VT100Screen *SCREEN)
 {
     VT100TCC result;
@@ -434,12 +452,12 @@ static VT100TCC decode_ansi(unsigned char *datap,
 }
 
 static VT100TCC decode_csi(unsigned char *datap,
-                           size_t datalen,
-                           size_t *rmlen,VT100Screen *SCREEN)
+                           int datalen,
+                           int *rmlen,VT100Screen *SCREEN)
 {
     VT100TCC result;
     CSIParam param={{0},0};
-    size_t paramlen;
+    int paramlen;
     int i;
 
     paramlen = getCSIParam(datap, datalen, &param, SCREEN);
@@ -556,9 +574,14 @@ static VT100TCC decode_csi(unsigned char *datap,
                     result.type = VT100CSI_TBC;
                     SET_PARAM_DEFAULT(param, 0, 0);
                     break;
-                    
+
                 case MAKE_CSI_COMMAND(' ', 'q'):
                     result.type = VT100CSI_DECSCUSR;
+                    SET_PARAM_DEFAULT(param, 0, 0);
+                    break;
+
+                case MAKE_CSI_COMMAND('!', 'p'):
+                    result.type = VT100CSI_DECSTR;
                     SET_PARAM_DEFAULT(param, 0, 0);
                     break;
 
@@ -724,8 +747,8 @@ static VT100TCC decode_csi(unsigned char *datap,
 }
 
 static VT100TCC decode_underscore(unsigned char *datap,
-                                  size_t datalen,
-                                  size_t *rmlen,
+                                  int datalen,
+                                  int *rmlen,
                                   NSStringEncoding enc)
 {
     VT100TCC result;
@@ -773,8 +796,8 @@ static VT100TCC decode_underscore(unsigned char *datap,
 }
 
 static VT100TCC decode_xterm(unsigned char *datap,
-                             size_t datalen,
-                             size_t *rmlen,
+                             int datalen,
+                             int *rmlen,
                              NSStringEncoding enc)
 {
     int mode = 0;
@@ -846,7 +869,7 @@ static VT100TCC decode_xterm(unsigned char *datap,
             datap++;
             (*rmlen)++;
         }
-        if (*datap == 7) {
+        if (datalen > 0 && *datap == 7) {
             str_end = YES;
         }
         if (!str_end && datalen == 0) {
@@ -905,6 +928,10 @@ static VT100TCC decode_xterm(unsigned char *datap,
                 // <Esc>]50;key=value^G
                 result.type = XTERMCC_SET_KVP;
                 break;
+            case 52:
+                // base64 copy/paste (OPT_PASTE64)
+                result.type = XTERMCC_PASTE64;
+                break;
             default:
                 result.type = VT100_NOTSUPPORT;
                 break;
@@ -916,19 +943,20 @@ static VT100TCC decode_xterm(unsigned char *datap,
 }
 
 static VT100TCC decode_other(unsigned char *datap,
-                             size_t datalen,
-                             size_t *rmlen,
+                             int datalen,
+                             int *rmlen,
                              NSStringEncoding enc)
 {
     VT100TCC result;
-    int c1, c2, c3;
+    int c1, c2;
 
     NSCParameterAssert(datap[0] == ESC);
     NSCParameterAssert(datalen > 1);
 
     c1 = (datalen >= 2 ? datap[1]: -1);
     c2 = (datalen >= 3 ? datap[2]: -1);
-    c3 = (datalen >= 4 ? datap[3]: -1);
+    // A third parameter could be available but isn't currently used.
+    // c3 = (datalen >= 4 ? datap[3]: -1);
 
     switch (c1) {
         case 27: // esc: two esc's in a row. Ignore the first one.
@@ -1147,8 +1175,8 @@ static VT100TCC decode_other(unsigned char *datap,
 }
 
 static VT100TCC decode_control(unsigned char *datap,
-                               size_t datalen,
-                               size_t *rmlen,
+                               int datalen,
+                               int *rmlen,
                                NSStringEncoding enc, VT100Screen *SCREEN)
 {
     VT100TCC result;
@@ -1202,8 +1230,8 @@ static VT100TCC decode_control(unsigned char *datap,
 //   single replacement symbol.
 // zero: Unfinished sequence, input needs to grow.
 static int decode_utf8_char(unsigned char *datap,
-                            size_t datalen,
-                            unsigned int *result)
+                            int datalen,
+                            int *result)
 {
     unsigned int theChar;
     int utf8Length;
@@ -1256,19 +1284,19 @@ static int decode_utf8_char(unsigned char *datap,
         return -utf8Length;
     }
 
-    *result = theChar;
+    *result = (int)theChar;
     return utf8Length;
 }
 
 static VT100TCC decode_utf8(unsigned char *datap,
-                            size_t datalen,
-                            size_t *rmlen)
+                            int datalen,
+                            int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
     int utf8DecodeResult;
-    unsigned int theChar = 0;
+    int theChar = 0;
 
     while (true) {
         utf8DecodeResult = decode_utf8_char(p, len, &theChar);
@@ -1298,6 +1326,7 @@ static VT100TCC decode_utf8(unsigned char *datap,
         // If some characters were successfully decoded, just return them
         // and ignore the error or end of stream for now.
         *rmlen = p - datap;
+        assert(p >= datap);
         result.type = VT100_STRING;
     } else {
         // Report error or waiting state.
@@ -1313,12 +1342,12 @@ static VT100TCC decode_utf8(unsigned char *datap,
 
 
 static VT100TCC decode_euccn(unsigned char *datap,
-                             size_t datalen,
-                             size_t *rmlen)
+                             int datalen,
+                             int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
 
     while (len > 0) {
@@ -1351,12 +1380,12 @@ static VT100TCC decode_euccn(unsigned char *datap,
 }
 
 static VT100TCC decode_big5(unsigned char *datap,
-                            size_t datalen,
-                            size_t *rmlen)
+                            int datalen,
+                            int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if (isbig5(*p)&&len>1) {
@@ -1388,12 +1417,12 @@ static VT100TCC decode_big5(unsigned char *datap,
 }
 
 static VT100TCC decode_euc_jp(unsigned char *datap,
-                              size_t datalen ,
-                              size_t *rmlen)
+                              int datalen ,
+                              int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if  (len > 1 && *p == 0x8e) {
@@ -1424,12 +1453,12 @@ static VT100TCC decode_euc_jp(unsigned char *datap,
 
 
 static VT100TCC decode_sjis(unsigned char *datap,
-                            size_t datalen ,
-                            size_t *rmlen)
+                            int datalen ,
+                            int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if (issjiskanji(*p)&&len>1) {
@@ -1457,12 +1486,12 @@ static VT100TCC decode_sjis(unsigned char *datap,
 
 
 static VT100TCC decode_euckr(unsigned char *datap,
-                             size_t datalen,
-                             size_t *rmlen)
+                             int datalen,
+                             int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if (iseuckr(*p)&&len>1) {
@@ -1484,12 +1513,12 @@ static VT100TCC decode_euckr(unsigned char *datap,
 }
 
 static VT100TCC decode_other_enc(unsigned char *datap,
-                                 size_t datalen,
-                                 size_t *rmlen)
+                                 int datalen,
+                                 int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if (*p>=0x80) {
@@ -1511,12 +1540,12 @@ static VT100TCC decode_other_enc(unsigned char *datap,
 }
 
 static VT100TCC decode_ascii_string(unsigned char *datap,
-                                 size_t datalen,
-                                 size_t *rmlen)
+                                 int datalen,
+                                 int *rmlen)
 {
     VT100TCC result;
     unsigned char *p = datap;
-    size_t len = datalen;
+    int len = datalen;
 
     while (len > 0) {
         if (*p >= 0x20 && *p <= 0x7f) {
@@ -1531,6 +1560,7 @@ static VT100TCC decode_ascii_string(unsigned char *datap,
         result.type = VT100_WAIT;
     } else {
         *rmlen = datalen - len;
+        assert(datalen >= len);
         result.type = VT100_ASCIISTRING;
     }
 
@@ -1570,8 +1600,8 @@ static NSString* SetReplacementCharInArray(unsigned char* datap, int* lenPtr, in
 }
 
 static VT100TCC decode_string(unsigned char *datap,
-                              size_t datalen,
-                              size_t *rmlen,
+                              int datalen,
+                              int *rmlen,
                               NSStringEncoding encoding)
 {
     VT100TCC result;
@@ -1658,56 +1688,55 @@ static VT100TCC decode_string(unsigned char *datap,
 #endif
     int i;
 
-    if ([super init] == nil)
-        return nil;
+    self = [super init];
+    if (self) {
+        ENCODING = NSASCIIStringEncoding;
+        total_stream_length = STANDARD_STREAM_SIZE;
+        STREAM = malloc(total_stream_length);
+        current_stream_length = 0;
 
-    ENCODING = NSASCIIStringEncoding;
-    total_stream_length = STANDARD_STREAM_SIZE;
-    STREAM = malloc(total_stream_length);
-    current_stream_length = 0;
+        termType = nil;
+        for(i = 0; i < TERMINFO_KEYS; i ++) {
+            key_strings[i]=NULL;
+        }
 
-    termType = nil;
-    for(i = 0; i < TERMINFO_KEYS; i ++) {
-        key_strings[i]=NULL;
+
+        LINE_MODE = NO;
+        CURSOR_MODE = NO;
+        COLUMN_MODE = NO;
+        SCROLL_MODE = NO;
+        SCREEN_MODE = NO;
+        ORIGIN_MODE = NO;
+        WRAPAROUND_MODE = YES;
+        AUTOREPEAT_MODE = NO;
+        INTERLACE_MODE = NO;
+        KEYPAD_MODE = NO;
+        INSERT_MODE = NO;
+        saveCHARSET=CHARSET = NO;
+        XON = YES;
+        bold = blink = reversed = under = NO;
+        saveBold = saveBlink = saveReversed = saveUnder = NO;
+        FG_COLORCODE = ALTSEM_FG_DEFAULT;
+        alternateForegroundSemantics = YES;
+        BG_COLORCODE = ALTSEM_BG_DEFAULT;
+        alternateBackgroundSemantics = YES;
+        saveForeground = FG_COLORCODE;
+        saveAltForeground = alternateForegroundSemantics;
+        saveBackground = BG_COLORCODE;
+        saveAltBackground = alternateBackgroundSemantics;
+        MOUSE_MODE = MOUSE_REPORTING_NONE;
+        MOUSE_FORMAT = MOUSE_FORMAT_XTERM;
+
+        TRACE = NO;
+
+        strictAnsiMode = NO;
+        allowColumnMode = YES;
+        allowKeypadMode = YES;
+
+        streamOffset = 0;
+
+        numLock = YES;
     }
-
-
-    LINE_MODE = NO;
-    CURSOR_MODE = NO;
-    COLUMN_MODE = NO;
-    SCROLL_MODE = NO;
-    SCREEN_MODE = NO;
-    ORIGIN_MODE = NO;
-    WRAPAROUND_MODE = YES;
-    AUTOREPEAT_MODE = NO;
-    INTERLACE_MODE = NO;
-    KEYPAD_MODE = NO;
-    INSERT_MODE = NO;
-    saveCHARSET=CHARSET = NO;
-    XON = YES;
-    bold = blink = reversed = under = NO;
-    saveBold = saveBlink = saveReversed = saveUnder = NO;
-    FG_COLORCODE = ALTSEM_FG_DEFAULT;
-    alternateForegroundSemantics = YES;
-    BG_COLORCODE = ALTSEM_BG_DEFAULT;
-    alternateBackgroundSemantics = YES;
-    saveForeground = FG_COLORCODE;
-    saveAltForeground = alternateForegroundSemantics;
-    saveBackground = BG_COLORCODE;
-    saveAltBackground = alternateBackgroundSemantics;
-    MOUSE_MODE = MOUSE_REPORTING_NONE;
-    MOUSE_FORMAT = MOUSE_FORMAT_XTERM;
-
-    TRACE = NO;
-
-    strictAnsiMode = NO;
-    allowColumnMode = YES;
-    allowKeypadMode = YES;
-
-    streamOffset = 0;
-
-    numLock = YES;
-
     return self;
 }
 
@@ -1853,6 +1882,7 @@ static VT100TCC decode_string(unsigned char *datap,
     MOUSE_MODE = MOUSE_REPORTING_NONE;
     MOUSE_FORMAT = MOUSE_FORMAT_XTERM;
     [SCREEN mouseModeDidChange:MOUSE_MODE];
+    REPORT_FOCUS = NO;
     
     TRACE = NO;
 
@@ -1917,6 +1947,7 @@ static VT100TCC decode_string(unsigned char *datap,
 
     memcpy(STREAM + current_stream_length, [data bytes], [data length]);
     current_stream_length += [data length];
+    assert(current_stream_length >= 0);
     if (current_stream_length == 0) {
         streamOffset = 0;
 	}
@@ -1931,12 +1962,13 @@ static VT100TCC decode_string(unsigned char *datap,
 - (void)clearStream
 {
     streamOffset = current_stream_length;
+    assert(streamOffset >= 0);
 }
 
 - (VT100TCC)getNextToken
 {
     unsigned char *datap;
-    size_t datalen;
+    int datalen;
     VT100TCC result;
 
 #if 0
@@ -1961,7 +1993,7 @@ static VT100TCC decode_string(unsigned char *datap,
             STREAM = malloc(total_stream_length);
         }
     } else {
-        size_t rmlen = 0;
+        int rmlen = 0;
 
         if (*datap >= 0x20 && *datap <= 0x7f) {
             result = decode_ascii_string(datap, datalen, &rmlen);
@@ -2002,6 +2034,7 @@ static VT100TCC decode_string(unsigned char *datap,
             }
             // mark our current position in the stream
             streamOffset += rmlen;
+            assert(streamOffset >= 0);
         }
     }
 
@@ -2213,7 +2246,7 @@ static VT100TCC decode_string(unsigned char *datap,
 - (NSData *)keyFunction:(int)no
 {
     char str[256];
-    size_t len;
+    int len;
 
     if (no <= 5) {
         if (key_strings[TERMINFO_KEY_F0+no]) {
@@ -2752,20 +2785,27 @@ static VT100TCC decode_string(unsigned char *datap,
         case VT100CSI_DECSC:
             [self saveCursorAttributes];
             break;
+        case VT100CSI_DECSTR:
+            WRAPAROUND_MODE = YES;
+            ORIGIN_MODE = NO;
+            break;
     }
 }
 
+- (void)resetSGR {
+    // all attributes off
+    bold = under = blink = reversed = NO;
+    FG_COLORCODE = ALTSEM_FG_DEFAULT;
+    alternateForegroundSemantics = YES;
+    BG_COLORCODE = ALTSEM_BG_DEFAULT;
+    alternateBackgroundSemantics = YES;
+}
 
 - (void)_setCharAttr:(VT100TCC)token
 {
     if (token.type == VT100CSI_SGR) {
         if (token.u.csi.count == 0) {
-            // all attribute off
-            bold = under = blink = reversed = NO;
-            FG_COLORCODE = ALTSEM_FG_DEFAULT;
-            alternateForegroundSemantics = YES;
-            BG_COLORCODE = ALTSEM_BG_DEFAULT;
-            alternateBackgroundSemantics = YES;
+            [self resetSGR];
         } else {
             int i;
             for (i = 0; i < token.u.csi.count; ++i) {
@@ -2850,6 +2890,8 @@ static VT100TCC decode_string(unsigned char *datap,
                 }
             }
         }
+    } else if (token.type == VT100CSI_DECSTR) {
+        [self resetSGR];
     }
 }
 
@@ -2952,14 +2994,18 @@ static VT100TCC decode_string(unsigned char *datap,
                 [[SCREEN session] remarry];
             }
         } else if ([key isEqualToString:@"CopyToClipboard"]) {
-            if ([value isEqualToString:@"ruler"]) {
-                [[SCREEN session] setPasteboard:NSGeneralPboard];
-            } else if ([value isEqualToString:@"find"]) {
-                [[SCREEN session] setPasteboard:NSFindPboard];
-            } else if ([value isEqualToString:@"font"]) {
-                [[SCREEN session] setPasteboard:NSFontPboard];
+            if ([[PreferencePanel sharedInstance] allowClipboardAccess]) {
+                if ([value isEqualToString:@"ruler"]) {
+                    [[SCREEN session] setPasteboard:NSGeneralPboard];
+                } else if ([value isEqualToString:@"find"]) {
+                    [[SCREEN session] setPasteboard:NSFindPboard];
+                } else if ([value isEqualToString:@"font"]) {
+                    [[SCREEN session] setPasteboard:NSFontPboard];
+                } else {
+                    [[SCREEN session] setPasteboard:NSGeneralPboard];
+                }
             } else {
-                [[SCREEN session] setPasteboard:NSGeneralPboard];
+                NSLog(@"Clipboard access denied for CopyToClipboard");
             }
         } else if ([key isEqualToString:@"EndCopy"]) {
             [[SCREEN session] setPasteboard:nil];
