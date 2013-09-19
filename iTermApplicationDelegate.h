@@ -102,6 +102,8 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
 
     // Set to YES when applicationDidFinishLaunching: is called.
     BOOL finishedLaunching_;
+
+    BOOL userHasInteractedWithAnySession_;  // Disables min 10-second running time
 }
 
 - (void)awakeFromNib;
@@ -166,6 +168,12 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
 - (IBAction) biggerFont: (id) sender;
 - (IBAction) smallerFont: (id) sender;
 
+// Paste speed control
+- (IBAction)pasteFaster:(id)sender;
+- (IBAction)pasteSlower:(id)sender;
+- (IBAction)pasteSlowlyFaster:(id)sender;
+- (IBAction)pasteSlowlySlower:(id)sender;
+
 // size
 - (IBAction)returnToDefaultSize:(id)sender;
 - (IBAction)exposeForTabs:(id)sender;
@@ -183,6 +191,9 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
 - (void)updateBroadcastMenuState;
 
 - (BOOL)showToolbelt;
+
+// Call this when the user has any nontrivial interaction with a session, such as typing in it or closing a window.
+- (void)userDidInteractWithASession;
 
 @end
 

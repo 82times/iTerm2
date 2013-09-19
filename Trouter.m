@@ -33,6 +33,7 @@
 @implementation Trouter
 
 @synthesize prefs = prefs_;
+@synthesize delegate = delegate_;
 
 - (Trouter *)init
 {
@@ -114,8 +115,8 @@
         return nil;
     }
 
-    // strip any trailing period or parenthesis
-    path = [path stringByReplacingOccurrencesOfRegex:@"[.)]$"
+    // strip various trailing characters that are unlikely to be part of the file name.
+    path = [path stringByReplacingOccurrencesOfRegex:@"[.),:]$"
                                           withString:@""];
 
     if (lineNumber != nil) {
@@ -166,20 +167,39 @@
 
 - (BOOL)openFileInEditor:(NSString *)path lineNumber:(NSString *)lineNumber {
     if ([self editor]) {
-        if ([[self editor] isEqualToString:kSublimeTextIdentifier]) {
+        if ([[self editor] isEqualToString:kSublimeText2Identifier] ||
+            [[self editor] isEqualToString:kSublimeText3Identifier]) {
             if (lineNumber != nil) {
                 path = [NSString stringWithFormat:@"%@:%@", path, lineNumber];
             }
 
-            NSString *bundlePath = [[NSWorkspace sharedWorkspace]
-                                       absolutePathForAppBundleWithIdentifier:@"com.sublimetext.2"];
-            NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
-            NSString *executable = [NSString stringWithFormat:@"%@/Contents/MacOS/%@",
-                                       bundlePath,
-                                       [bundle objectForInfoDictionaryKey:@"CFBundleExecutable"]];
-            if (bundlePath && bundle && executable) {
-                [NSTask launchedTaskWithLaunchPath:executable
-                                         arguments:[NSArray arrayWithObjects:executable, path, nil]];
+            NSString *bundlePath;
+            if ([[self editor] isEqualToString:kSublimeText3Identifier]) {
+                bundlePath = [[NSWorkspace sharedWorkspace]
+                                 absolutePathForAppBundleWithIdentifier:@"com.sublimetext.3"];
+            } else {
+                bundlePath = [[NSWorkspace sharedWorkspace]
+                                 absolutePathForAppBundleWithIdentifier:@"com.sublimetext.2"];
+            }
+            if (bundlePath) {
+                NSString *sublExecutable = [NSString stringWithFormat:@"%@/Contents/SharedSupport/bin/subl",
+                                            bundlePath];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:sublExecutable]) {
+                    [NSTask launchedTaskWithLaunchPath:sublExecutable
+                                             arguments:[NSArray arrayWithObjects:path, nil]];
+                } else {
+                    // This isn't as good as opening "subl" because it always opens a new instance
+                    // of the app but it's the OS-sanctioned way of running Sublimetext.  We can't
+                    // use Applescript because it won't open the file to a particular line number.
+                    NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
+                    NSString *sublimeTextExecutable = [NSString stringWithFormat:@"%@/Contents/MacOS/%@",
+                                                       bundlePath,
+                                                       [bundle objectForInfoDictionaryKey:@"CFBundleExecutable"]];
+                    if (bundle && sublimeTextExecutable) {
+                        [NSTask launchedTaskWithLaunchPath:sublimeTextExecutable
+                                                 arguments:[NSArray arrayWithObjects:sublimeTextExecutable, path, nil]];
+                    }
+                }
             }
         } else {
             path = [path stringByAddingPercentEscapesUsingEncoding:NSASCIIStringEncoding];
@@ -207,19 +227,14 @@
             workingDirectory:workingDirectory
                   lineNumber:&lineNumber];
 
+    NSString *script = [prefs_ objectForKey:kTrouterTextKey];
+    script = [script stringByReplacingBackreference:1 withString:path ? [path stringWithEscapedShellCharacters] : @""];
+    script = [script stringByReplacingBackreference:2 withString:lineNumber ? lineNumber : @""];
+    script = [script stringByReplacingBackreference:3 withString:[prefix stringWithEscapedShellCharacters]];
+    script = [script stringByReplacingBackreference:4 withString:[suffix stringWithEscapedShellCharacters]];
+    script = [script stringByReplacingBackreference:5 withString:[workingDirectory stringWithEscapedShellCharacters]];
 
     if ([[prefs_ objectForKey:kTrouterActionKey] isEqualToString:kTrouterRawCommandAction]) {
-        NSString *script = [prefs_ objectForKey:kTrouterTextKey];
-        script = [script stringByReplacingBackreference:1
-                                             withString:path ? [path stringWithEscapedShellCharacters] : @""];
-            script = [script stringByReplacingBackreference:2
-                                                 withString:lineNumber ? lineNumber : @""];
-        script = [script stringByReplacingBackreference:3
-                                             withString:[prefix stringWithEscapedShellCharacters]];
-        script = [script stringByReplacingBackreference:4
-                                             withString:[suffix stringWithEscapedShellCharacters]];
-        script = [script stringByReplacingBackreference:5
-                                             withString:[workingDirectory stringWithEscapedShellCharacters]];
         [[NSTask launchedTaskWithLaunchPath:@"/bin/sh"
                                   arguments:[NSArray arrayWithObjects:@"-c", script, nil]] waitUntilExit];
         return YES;
@@ -230,14 +245,14 @@
     }
 
     if ([[prefs_ objectForKey:kTrouterActionKey] isEqualToString:kTrouterCommandAction]) {
-        NSString *script = [prefs_ objectForKey:kTrouterTextKey];
-        script = [script stringByReplacingBackreference:1 withString:path ? [path stringWithEscapedShellCharacters] : @""];
-        script = [script stringByReplacingBackreference:2 withString:lineNumber ? lineNumber : @""];
-        script = [script stringByReplacingBackreference:3 withString:[prefix stringWithEscapedShellCharacters]];
-        script = [script stringByReplacingBackreference:4 withString:[suffix stringWithEscapedShellCharacters]];
-        script = [script stringByReplacingBackreference:5 withString:[workingDirectory stringWithEscapedShellCharacters]];
         [[NSTask launchedTaskWithLaunchPath:@"/bin/sh"
                                   arguments:[NSArray arrayWithObjects:@"-c", script, nil]] waitUntilExit];
+        return YES;
+    }
+
+    if ([[prefs_ objectForKey:kTrouterActionKey] isEqualToString:kTrouterCoprocessAction]) {
+        assert(delegate_);
+        [delegate_ trouterLaunchCoprocessWithCommand:script];
         return YES;
     }
 

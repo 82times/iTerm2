@@ -36,8 +36,12 @@
 const int kSearchWidgetHeight = 22;
 const int kInterWidgetMargin = 10;
 
-@implementation ProfileListView
+@interface ProfileListView ()
+- (NSDictionary *)rowOrder;
+- (void)syncTableViewsWithSelectedGuids:(NSArray *)guids;
+@end
 
+@implementation ProfileListView
 
 - (void)awakeFromNib
 {
@@ -91,9 +95,14 @@ const int kInterWidgetMargin = 10;
     }
 }
 
-- (BOOL)tableView:(NSTableView *)aTableView acceptDrop:(id <NSDraggingInfo>)info
-              row:(NSInteger)row dropOperation:(NSTableViewDropOperation)operation
+- (BOOL)tableView:(NSTableView *)aTableView
+       acceptDrop:(id <NSDraggingInfo>)info
+              row:(NSInteger)row
+    dropOperation:(NSTableViewDropOperation)operation
 {
+    [[self undoManager] registerUndoWithTarget:self
+                                      selector:@selector(setRowOrder:)
+                                        object:[self rowOrder]];
     NSPasteboard* pboard = [info draggingPasteboard];
     NSData* rowData = [pboard dataForType:kProfileTableViewDataType];
     NSSet* guids = [NSKeyedUnarchiver unarchiveObjectWithData:rowData];
@@ -126,18 +135,23 @@ const int kInterWidgetMargin = 10;
     // move because it would be overwhelming so we must do it ourselves. This
     // makes all other table views sync with the new order. First, add commands
     // to rebuild the menus.
+    [self syncTableViewsWithSelectedGuids:[guids allObjects]];
+    return YES;
+}
+
+- (void)syncTableViewsWithSelectedGuids:(NSArray *)guids
+{
     [[dataSource_ underlyingModel] rebuildMenus];
     [[dataSource_ underlyingModel] postChangeNotification];
 
     NSMutableIndexSet* newIndexes = [[[NSMutableIndexSet alloc] init] autorelease];
     for (NSString* guid in guids) {
-        row = [dataSource_ indexOfProfileWithGuid:guid];
+        int row = [dataSource_ indexOfProfileWithGuid:guid];
         [newIndexes addIndex:row];
     }
     [tableView_ selectRowIndexes:newIndexes byExtendingSelection:NO];
 
     [self reloadData];
-    return YES;
 }
 
 // End Drag drop -------------------------------
@@ -308,7 +322,56 @@ const int kInterWidgetMargin = 10;
 
 - (NSMenu *)menuForEvent:(NSEvent *)theEvent
 {
-    return [delegate_ profileTable:self menuForEvent:theEvent];
+    if ([delegate_ respondsToSelector:@selector(profileTable:menuForEvent:)]) {
+        return [delegate_ profileTable:self menuForEvent:theEvent];
+    }
+    return nil;
+}
+
+#pragma mark Undo
+
+- (NSArray *)orderedGuids
+{
+    NSMutableArray* result = [[[NSMutableArray alloc] init] autorelease];
+    for (int i = 0; i < [tableView_ numberOfRows]; i++) {
+        Profile* profile = [dataSource_ profileAtIndex:i];
+        if (profile) {
+            [result addObject:[profile objectForKey:KEY_GUID]];
+        }
+    }
+    return result;
+}
+
+- (NSDictionary *)rowOrderWithSortDescriptors:(NSArray *)descriptors
+{
+    NSMutableDictionary *rowOrder = [NSMutableDictionary dictionary];
+    if (descriptors) {
+        [rowOrder setObject:descriptors forKey:@"descriptors"];
+    }
+    [rowOrder setObject:[self orderedGuids] forKey:@"guids"];
+    return rowOrder;
+}
+
+- (NSDictionary *)rowOrder
+{
+    return [self rowOrderWithSortDescriptors:[tableView_ sortDescriptors]];
+}
+
+- (void)setRowOrder:(NSDictionary *)rowOrder
+{
+    [[self undoManager] registerUndoWithTarget:self
+                                      selector:@selector(setRowOrder:)
+                                        object:[self rowOrder]];
+    NSArray *selectedGuids = [[self selectedGuids] allObjects];
+    NSArray *descriptors = [rowOrder objectForKey:@"descriptors"];
+    if (descriptors) {
+        [tableView_ setSortDescriptors:descriptors];
+    }
+    NSArray *guids = [rowOrder objectForKey:@"guids"];
+    for (int i = 0; i < [guids count]; i++) {
+        [[dataSource_ underlyingModel] moveGuid:[guids objectAtIndex:i] toRow:i];
+    }
+    [self syncTableViewsWithSelectedGuids:selectedGuids];
 }
 
 #pragma mark NSTableView data source
@@ -319,6 +382,10 @@ const int kInterWidgetMargin = 10;
 
 - (void)tableView:(NSTableView *)aTableView sortDescriptorsDidChange:(NSArray *)oldDescriptors
 {
+    [[self undoManager] registerUndoWithTarget:self
+                                      selector:@selector(setRowOrder:)
+                                        object:[self rowOrderWithSortDescriptors:oldDescriptors]];
+
     [dataSource_ setSortDescriptors:[aTableView sortDescriptors]];
     [dataSource_ sort];
     [dataSource_ pushOrderToUnderlyingModel];
@@ -394,30 +461,30 @@ const int kInterWidgetMargin = 10;
             return @"";
         }
     } else if (aTableColumn == starColumn_) {
-        // FIXME: clean up drawing code
-        static NSImage* starImage;
-        if (!starImage) {
-            starImage = [[NSImage imageNamed:@"star"] retain];
-        }
-        NSImage *image = [[[NSImage alloc] init] autorelease];
-        NSSize size;
-        size.width = [aTableColumn width];
-        size.height = rowHeightWithTags_;
-        [image setSize:size];
-
-        NSRect rect;
-        rect.origin.x = 0;
-        rect.origin.y = 0;
-        rect.size = size;
-        [image lockFocus];
         if ([[bookmark objectForKey:KEY_GUID] isEqualToString:[[[ProfileModel sharedInstance] defaultBookmark] objectForKey:KEY_GUID]]) {
-            NSPoint destPoint;
-            destPoint.x = (size.width - [starImage size].width) / 2;
-            destPoint.y = (rowHeightWithTags_ - [starImage size].height) / 2;
-            [starImage drawAtPoint:destPoint fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1.0];
+            static NSImage* starImage;
+            if (!starImage) {
+                starImage = [[NSImage imageNamed:@"star"] retain];
+            }
+            CGFloat thisRowHeight;
+            if ([[bookmark objectForKey:KEY_TAGS] count]) {
+                thisRowHeight = rowHeightWithTags_;
+            } else {
+                thisRowHeight = normalRowHeight_;
+            }
+            CGFloat starHeight = normalRowHeight_ - 2;
+
+            NSImage *image = [[[NSImage alloc] init] autorelease];
+            [image setSize:NSMakeSize(thisRowHeight, thisRowHeight)];
+            [image lockFocus];
+            CGFloat margin = (thisRowHeight - starHeight) / 2;
+            NSRect dest = NSMakeRect(margin, margin, thisRowHeight - 2*margin, thisRowHeight - 2*margin);
+            [starImage drawInRect:dest fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1.0];
+            [image unlockFocus];
+            return image;
+        } else {
+            return nil;
         }
-        [image unlockFocus];
-        return image;
     }
 
     return @"";
@@ -646,7 +713,10 @@ const int kInterWidgetMargin = 10;
 
 - (void)dataChangeNotification:(id)sender
 {
-    [self reloadData];
+    // Use a delayed perform so the underlying model has a chance to parse its journal.
+    [self performSelector:@selector(reloadData)
+               withObject:nil
+               afterDelay:0];
 }
 
 - (void)onDoubleClick:(id)sender
@@ -695,7 +765,7 @@ const int kInterWidgetMargin = 10;
 
 - (void)turnOnDebug
 {
-    NSLog(@"Debugging object at %x. Current count is %d", (void*)self, [self retainCount]);
+    NSLog(@"Debugging object at %p. Current count is %d", (void*)self, (int)[self retainCount]);
     debug=YES;
 }
 

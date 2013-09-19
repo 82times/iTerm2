@@ -577,14 +577,13 @@ static void reapchild(int n)
                  width:(int)width
                 height:(int)height
                 isUTF8:(BOOL)isUTF8
-        asLoginSession:(BOOL)asLoginSession
 {
     struct termios term;
     struct winsize win;
     char theTtyname[PATH_MAX];
 
-	[command_ autorelease];
-	command_ = [progpath copy];
+    [command_ autorelease];
+    command_ = [progpath copy];
     path = [progpath copy];
 
     setup_tty_param(&term, &win, width, height, isUTF8);
@@ -596,11 +595,7 @@ static void reapchild(int n)
     int max = (args == nil) ? 0 : [args count];
     const char* argv[max + 2];
 
-    if (asLoginSession) {
-        argv[0] = [[NSString stringWithFormat:@"-%@", [progpath stringByStandardizingPath]] UTF8String];
-    } else {
-        argv[0] = [[progpath stringByStandardizingPath] UTF8String];
-    }
+    argv[0] = [[progpath stringByStandardizingPath] UTF8String];
     if (args != nil) {
         int i;
         for (i = 0; i < max; ++i) {
@@ -627,10 +622,10 @@ static void reapchild(int n)
         // Do not start the new process with a signal handler.
         signal(SIGCHLD, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
-		sigset_t signals;
-		sigemptyset(&signals);
-		sigaddset(&signals, SIGPIPE);
-		sigprocmask(SIG_UNBLOCK, &signals, NULL);
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGPIPE);
+        sigprocmask(SIG_UNBLOCK, &signals, NULL);
 
         chdir(initialPwd);
         for (i = 0; i < envsize; i++) {
@@ -751,7 +746,6 @@ static void reapchild(int n)
     // No data?
     if ((written < 0) && (!(errno == EAGAIN || errno == EINTR))) {
         [self brokenPipe];
-        return;
     } else if (written > 0) {
         // Shrink the writeBuffer
         length = [writeBuffer length] - written;
@@ -779,14 +773,18 @@ static void reapchild(int n)
     return delegate;
 }
 
-// The bytes in data were just read from the fd.
-- (void)readTask:(NSData*)data
-{
+- (void)logData:(NSData *)data {
     @synchronized(logHandle) {
         if ([self logging]) {
             [logHandle writeData:data];
         }
     }
+}
+
+// The bytes in data were just read from the fd.
+- (void)readTask:(NSData*)data
+{
+    [self logData:data];
 
     // forward the data to our delegate
     if ([delegate respondsToSelector:@selector(readTask:)]) {
@@ -860,6 +858,7 @@ static void reapchild(int n)
 
 - (void)stop
 {
+    [self loggingStop];
     [self sendSignal:SIGHUP];
 
     if (fd >= 0) {
@@ -976,7 +975,11 @@ static void reapchild(int n)
 
         pid_t ppid = taskAllInfo.pbsd.pbi_ppid;
         if (ppid == parentPid) {
-            long long birthday = taskAllInfo.pbsd.pbi_start_tvsec * 1000000 + taskAllInfo.pbsd.pbi_start_tvusec;  // 10.6 and up
+#ifdef BLOCKS_NOT_AVAILABLE  // OS 10.5
+            long long birthday = taskAllInfo.pbsd.pbi_start.tv_sec * 1000000 + taskAllInfo.pbsd.pbi_start.tv_usec;
+#else  // OS 10.6+
+            long long birthday = taskAllInfo.pbsd.pbi_start_tvsec * 1000000 + taskAllInfo.pbsd.pbi_start_tvusec;
+#endif
             if (birthday < oldestTime || oldestTime == 0) {
                 oldestTime = birthday;
                 oldestPid = pids[i];

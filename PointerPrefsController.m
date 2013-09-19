@@ -11,6 +11,7 @@
 #import "PreferencePanel.h"
 #import "iTermApplicationDelegate.h"
 #import "ITAddressBookMgr.h"
+#import "FutureMethods.h"
 
 static NSString *kPointerActionsKey = @"PointerActions";  // Used in NSUserDefaults
 static NSString *kActionKey = @"Action";  // Used within values
@@ -717,6 +718,8 @@ typedef enum {
 
 - (void)setButtonNumber:(int)buttonNumber clickCount:(int)clickCount modifiers:(int)modMask
 {
+    DLog(@"PointerPrefsController setButtonNumber:%d clickCount:%d modifiers:0x%x",
+         buttonNumber, clickCount, modMask);
     if (buttonNumber >= 1 && clickCount > 0 && clickCount < 5) {
         [editButton_ selectItemWithTag:buttonNumber];
         [editClickType_ selectItemWithTag:clickCount];

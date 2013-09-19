@@ -48,6 +48,7 @@
 NSString* kDeleteKeyString = @"0x7f-0x0";
 
 static float versionNumber;
+static NSString * const kRebuildColorPresetsMenuNotification = @"kRebuildColorPresetsMenuNotification";
 
 @interface NSFileManager (TemporaryDirectory)
 
@@ -184,6 +185,10 @@ static float versionNumber;
                                              selector:@selector(keyBindingsChanged)
                                                  name:@"iTermKeyBindingsChanged"
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(rebuildColorPresetsMenu)
+                                                 name:kRebuildColorPresetsMenuNotification
+                                               object:nil];
     return (self);
 }
 
@@ -258,7 +263,7 @@ static float versionNumber;
     }
 }
 
-- (void)_rebuildColorPresetsMenu
+- (void)rebuildColorPresetsMenu
 {
     while ([presetsMenu numberOfItems] > 1) {
         [presetsMenu removeItemAtIndex:1];
@@ -305,7 +310,8 @@ static float versionNumber;
     [customPresets setObject:theDict forKey:temp];
     [[NSUserDefaults standardUserDefaults] setObject:customPresets forKey:CUSTOM_COLOR_PRESETS];
 
-    [self _rebuildColorPresetsMenu];
+    [[NSNotificationCenter defaultCenter] postNotificationName:kRebuildColorPresetsMenuNotification
+                                                        object:nil];
 }
 
 - (NSString*)_presetNameFromFilename:(NSString*)filename
@@ -473,7 +479,8 @@ static float versionNumber;
         [newCustom removeObjectForKey:[[pub selectedItem] title]];
         [[NSUserDefaults standardUserDefaults] setObject:newCustom
                                                   forKey:CUSTOM_COLOR_PRESETS];
-        [self _rebuildColorPresetsMenu];
+        [[NSNotificationCenter defaultCenter] postNotificationName:kRebuildColorPresetsMenuNotification
+                                                            object:nil];
     }
 }
 
@@ -541,7 +548,7 @@ static float versionNumber;
     [[screenButton lastItem] setTag:-1];
     for (NSScreen* screen in [NSScreen screens]) {
         if (i == 0) {
-            [screenButton addItemWithTitle:[NSString stringWithFormat:@"Main Screen", i]];
+            [screenButton addItemWithTitle:[NSString stringWithFormat:@"Main Screen"]];
         } else {
             [screenButton addItemWithTitle:[NSString stringWithFormat:@"Screen %d", i+1]];
         }
@@ -575,7 +582,7 @@ static float versionNumber;
     keyboardToolbarId = [keyboardToolbarItem itemIdentifier];
     arrangementsToolbarId = [arrangementsToolbarItem itemIdentifier];
     mouseToolbarId = [mouseToolbarItem itemIdentifier];
-  
+
     [globalToolbarItem setEnabled:YES];
     [toolbar setSelectedItemIdentifier:globalToolbarId];
 
@@ -598,7 +605,7 @@ static float versionNumber;
     [copyTo allowMultipleSelections];
 
     // Add presets to preset color selection.
-    [self _rebuildColorPresetsMenu];
+    [self rebuildColorPresetsMenu];
 
     // Add preset keybindings to button-popup-list.
     NSArray* presetArray = [iTermKeyBindingMgr presetKeyMappingsNames];
@@ -1201,6 +1208,7 @@ static float versionNumber;
     defaultHotKeyBookmarkGuid = [[prefs objectForKey:@"HotKeyBookmark"] copy];
     defaultEnableBonjour = [prefs objectForKey:@"EnableRendezvous"]?[[prefs objectForKey:@"EnableRendezvous"] boolValue]: NO;
     defaultCmdSelection = [prefs objectForKey:@"CommandSelection"]?[[prefs objectForKey:@"CommandSelection"] boolValue]: YES;
+    defaultOptionClickMovesCursor = [prefs objectForKey:@"OptionClickMovesCursor"]?[[prefs objectForKey:@"OptionClickMovesCursor"] boolValue]: YES;
     defaultPassOnControlLeftClick = [prefs objectForKey:@"PassOnControlClick"]?[[prefs objectForKey:@"PassOnControlClick"] boolValue] : NO;
     defaultMaxVertically = [prefs objectForKey:@"MaxVertically"] ? [[prefs objectForKey:@"MaxVertically"] boolValue] : NO;
     defaultClosingHotkeySwitchesSpaces = [prefs objectForKey:@"ClosingHotkeySwitchesSpaces"] ? [[prefs objectForKey:@"ClosingHotkeySwitchesSpaces"] boolValue] : YES;
@@ -1317,7 +1325,7 @@ static float versionNumber;
     [prefs setBool:defaultThreeFingerEmulatesMiddle forKey:@"ThreeFingerEmulates"];
     [prefs setBool:defaultHideTab forKey:@"HideTab"];
     [prefs setInteger:defaultWindowStyle forKey:@"WindowStyle"];
-	[prefs setInteger:defaultOpenTmuxWindowsIn forKey:@"OpenTmuxWindowsIn"];
+        [prefs setInteger:defaultOpenTmuxWindowsIn forKey:@"OpenTmuxWindowsIn"];
     [prefs setBool:defaultAutoHideTmuxClientSession forKey:@"AutoHideTmuxClientSession"];
     [prefs setInteger:defaultTabViewType forKey:@"TabViewType"];
     [prefs setBool:defaultPromptOnQuit forKey:@"PromptOnQuit"];
@@ -1328,6 +1336,7 @@ static float versionNumber;
     [prefs setValue:defaultHotKeyBookmarkGuid forKey:@"HotKeyBookmark"];
     [prefs setBool:defaultEnableBonjour forKey:@"EnableRendezvous"];
     [prefs setBool:defaultCmdSelection forKey:@"CommandSelection"];
+    [prefs setBool:defaultOptionClickMovesCursor forKey:@"OptionClickMovesCursor"];
     [prefs setFloat:defaultFsTabDelay forKey:@"FsTabDelay"];
     [prefs setBool:defaultPassOnControlLeftClick forKey:@"PassOnControlClick"];
     [prefs setBool:defaultMaxVertically forKey:@"MaxVertically"];
@@ -1339,7 +1348,7 @@ static float versionNumber;
     [prefs setFloat:defaultStrokeThickness forKey:@"HiddenAFRStrokeThickness"];
     [prefs setObject:defaultWordChars forKey: @"WordCharacters"];
     [prefs setObject:[NSNumber numberWithInt:defaultTmuxDashboardLimit]
-			  forKey:@"TmuxDashboardLimit"];
+                          forKey:@"TmuxDashboardLimit"];
     [prefs setBool:defaultOpenBookmark forKey:@"OpenBookmark"];
     [prefs setObject:[dataSource rawData] forKey: @"New Bookmarks"];
     [prefs setBool:defaultQuitWhenAllWindowsClosed forKey:@"QuitWhenAllWindowsClosed"];
@@ -1422,7 +1431,8 @@ static float versionNumber;
     [self _populateHotKeyBookmarksMenu];
     [enableBonjour setState: defaultEnableBonjour?NSOnState:NSOffState];
     [cmdSelection setState: defaultCmdSelection?NSOnState:NSOffState];
-    [passOnControlLeftClick setState: defaultPassOnControlLeftClick?NSOnState:NSOffState];
+    [optionClickMovesCursor setState: defaultOptionClickMovesCursor?NSOnState:NSOffState];
+    [controlLeftClickActsLikeRightClick setState: defaultPassOnControlLeftClick?NSOffState:NSOnState];
     [maxVertically setState: defaultMaxVertically?NSOnState:NSOffState];
     [closingHotkeySwitchesSpaces setState:defaultClosingHotkeySwitchesSpaces?NSOnState:NSOffState];
     [useCompactLabel setState: defaultUseCompactLabel?NSOnState:NSOffState];
@@ -1456,7 +1466,7 @@ static float versionNumber;
         [openArrangementAtStartup setState:NO];
     }
     [hotkey setState: defaultHotkey?NSOnState:NSOffState];
-    if (defaultHotkeyCode) {
+    if (defaultHotkeyCode || defaultHotkeyChar) {
         [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", defaultHotkeyChar, defaultHotkeyModifiers]]];
     } else {
         [hotkeyField setStringValue:@""];
@@ -1656,7 +1666,7 @@ static float versionNumber;
         sender == animateDimming ||
         sender == dimOnlyText ||
         sender == dimmingAmount ||
-		sender == openTmuxWindows ||
+                sender == openTmuxWindows ||
         sender == threeFingerEmulatesMiddle ||
         sender == autoHideTmuxClientSession ||
         sender == showWindowBorder) {
@@ -1763,13 +1773,14 @@ static float versionNumber;
         }
 
         defaultCmdSelection = ([cmdSelection state] == NSOnState);
-        defaultPassOnControlLeftClick = ([passOnControlLeftClick state] == NSOnState);
+        defaultOptionClickMovesCursor = ([optionClickMovesCursor state] == NSOnState);
+        defaultPassOnControlLeftClick = ([controlLeftClickActsLikeRightClick state] == NSOffState);
         defaultMaxVertically = ([maxVertically state] == NSOnState);
         defaultClosingHotkeySwitchesSpaces = ([closingHotkeySwitchesSpaces state] == NSOnState);
         defaultOpenBookmark = ([openBookmark state] == NSOnState);
         [defaultWordChars release];
         defaultWordChars = [[wordChars stringValue] retain];
-		defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
+                defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
         defaultQuitWhenAllWindowsClosed = ([quitWhenAllWindowsClosed state] == NSOnState);
         defaultCheckUpdate = ([checkUpdate state] == NSOnState);
         defaultSmartPlacement = ([smartPlacement state] == NSOnState);
@@ -1785,7 +1796,8 @@ static float versionNumber;
         defaultHotkey = ([hotkey state] == NSOnState);
         if (defaultHotkey != oldDefaultHotkey) {
             if (defaultHotkey) {
-                [[iTermController sharedInstance] registerHotkey:defaultHotkeyCode modifiers:defaultHotkeyModifiers];
+                // Hotkey was enabled but might be unassigned; give it a default value if needed.
+                [self sanityCheckHotKey];
             } else {
                 [[iTermController sharedInstance] unregisterHotkey];
             }
@@ -1924,7 +1936,7 @@ static float versionNumber;
 
 - (int)openTmuxWindowsIn
 {
-	return defaultOpenTmuxWindowsIn;
+        return defaultOpenTmuxWindowsIn;
 }
 
 - (BOOL)autoHideTmuxClientSession
@@ -1934,7 +1946,7 @@ static float versionNumber;
 
 - (int)tmuxDashboardLimit
 {
-	return defaultTmuxDashboardLimit;
+        return defaultTmuxDashboardLimit;
 }
 
 - (BOOL)promptOnQuit
@@ -1980,6 +1992,11 @@ static float versionNumber;
 - (BOOL)cmdSelection
 {
     return defaultCmdSelection;
+}
+
+- (BOOL)optionClickMovesCursor
+{
+    return defaultOptionClickMovesCursor;
 }
 
 - (BOOL)passOnControlLeftClick
@@ -2139,6 +2156,11 @@ static float versionNumber;
     return defaultHotkey;
 }
 
+- (short)hotkeyChar
+{
+    return defaultHotkeyChar;
+}
+
 - (int)hotkeyCode
 {
     return defaultHotkeyCode;
@@ -2225,8 +2247,8 @@ static float versionNumber;
     if ([self _stringIsUrlLike:folder]) {
         filename = folder;
     } else {
-		filename = [filename stringByExpandingTildeInPath];
-	}
+                filename = [filename stringByExpandingTildeInPath];
+        }
     return filename;
 }
 
@@ -2289,6 +2311,19 @@ static float versionNumber;
     return [[NSUserDefaults standardUserDefaults] objectForKey:@"LoadPrefsFromCustomFolder"] ? [[[NSUserDefaults standardUserDefaults] objectForKey:@"LoadPrefsFromCustomFolder"] boolValue] : NO;
 }
 
+- (BOOL)preferenceKeyIsSyncable:(NSString *)key
+{
+    NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
+                           @"PrefsCustomFolder",
+                           @"iTerm Version",
+                           nil];
+    return ![exemptKeys containsObject:key] &&
+           ![key hasPrefix:@"NS"] &&
+           ![key hasPrefix:@"SU"] &&
+           ![key hasPrefix:@"NoSync"] &&
+           ![key hasPrefix:@"UK"];
+}
+
 - (BOOL)loadPrefs
 {
     static BOOL done;
@@ -2306,26 +2341,14 @@ static float versionNumber;
     if (remotePrefs && [remotePrefs count]) {
         NSDictionary *localPrefs = [NSDictionary dictionaryWithContentsOfFile:[self _prefsFilename]];
         // Empty out the current prefs
-        NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
-                               @"PrefsCustomFolder", @"iTerm Version", nil];
         for (NSString *key in localPrefs) {
-            if (![exemptKeys containsObject:key] &&
-                ![key hasPrefix:@"NS"] && 
-                ![key hasPrefix:@"SU"] &&
-                ![key hasPrefix:@"NoSync"] &&
-                ![key hasPrefix:@"UK"]) {
-
+            if ([self preferenceKeyIsSyncable:key]) {
                 [[NSUserDefaults standardUserDefaults] removeObjectForKey:key];
             }
         }
 
         for (NSString *key in remotePrefs) {
-            if (![exemptKeys containsObject:key] &&
-                ![key hasPrefix:@"NS"] && 
-                ![key hasPrefix:@"SU"] &&
-                ![key hasPrefix:@"NoSync"] &&
-                ![key hasPrefix:@"UK"]) {
-
+            if ([self preferenceKeyIsSyncable:key]) {
                 [[NSUserDefaults standardUserDefaults] setObject:[remotePrefs objectForKey:key]
                                                           forKey:key];
             }
@@ -2349,32 +2372,20 @@ static float versionNumber;
     }
     NSDictionary *remotePrefs = [self _remotePrefs];
     if (remotePrefs && [remotePrefs count]) {
-        NSDictionary *localPrefs = [prefs dictionaryRepresentation];
+        // Grab all prefs from our bundle only (no globals, etc.).
+        NSDictionary *localPrefs = [prefs persistentDomainForName:[[NSBundle mainBundle] bundleIdentifier]];
         // Iterate over each set of prefs and validate that the other has the same value for each key.
-        NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
-                               @"PrefsCustomFolder", @"iTerm Version", nil];
-
         for (NSString *key in localPrefs) {
-            if (![exemptKeys containsObject:key]) {
-                if (![key hasPrefix:@"NS"] &&
-                    ![key hasPrefix:@"SU"] &&
-                    ![key hasPrefix:@"NoSync"] &&
-                    ![key hasPrefix:@"UK"] &&
-                    ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
-                    return YES;
-                }
+            if ([self preferenceKeyIsSyncable:key] &&
+                ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
+                return YES;
             }
         }
 
         for (NSString *key in remotePrefs) {
-            if (![exemptKeys containsObject:key]) {
-                if (![key hasPrefix:@"NS"] &&
-                    ![key hasPrefix:@"SU"] &&
-                    ![key hasPrefix:@"NoSync"] &&
-                    ![key hasPrefix:@"UK"] &&
-                    ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
-                    return YES;
-                }
+            if ([self preferenceKeyIsSyncable:key] &&
+                ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
+                return YES;
             }
         }
         return NO;
@@ -2866,13 +2877,15 @@ static float versionNumber;
         [useBrightBold setState:NSOnState];
     }
 
+    [useItalicFont setState:[[dict objectForKey:KEY_USE_ITALIC_FONT] boolValue] ? NSOnState : NSOffState];
+
     [transparency setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
-	if ([dict objectForKey:KEY_BLEND]) {
-	  [blend setFloatValue:[[dict objectForKey:KEY_BLEND] floatValue]];
-	} else {
-		// Old clients used transparency for blending
-		[blend setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
-	}
+        if ([dict objectForKey:KEY_BLEND]) {
+          [blend setFloatValue:[[dict objectForKey:KEY_BLEND] floatValue]];
+        } else {
+                // Old clients used transparency for blending
+                [blend setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
+        }
     [blurRadius setFloatValue:[dict objectForKey:KEY_BLUR_RADIUS] ? [[dict objectForKey:KEY_BLUR_RADIUS] floatValue] : 2.0];
     [blur setState:[[dict objectForKey:KEY_BLUR] boolValue] ? NSOnState : NSOffState];
     if ([dict objectForKey:KEY_ASCII_ANTI_ALIASED]) {
@@ -2892,10 +2905,11 @@ static float versionNumber;
     [backgroundImage setState:[imageFilename length] > 0 ? NSOnState : NSOffState];
     [backgroundImagePreview setImage:[[[NSImage alloc] initByReferencingFile:imageFilename] autorelease]];
     backgroundImageFilename = imageFilename;
+    [backgroundImageTiled setState:[[dict objectForKey:KEY_BACKGROUND_IMAGE_TILED] boolValue] ? NSOnState : NSOffState];
 
     // Terminal tab
     [disableWindowResizing setState:[[dict objectForKey:KEY_DISABLE_WINDOW_RESIZING] boolValue] ? NSOnState : NSOffState];
-	[hideAfterOpening setState:[[dict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue] ? NSOnState : NSOffState];
+        [hideAfterOpening setState:[[dict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue] ? NSOnState : NSOffState];
     [syncTitle setState:[[dict objectForKey:KEY_SYNC_TITLE] boolValue] ? NSOnState : NSOffState];
     [closeSessionsOnEnd setState:[[dict objectForKey:KEY_CLOSE_SESSIONS_ON_END] boolValue] ? NSOnState : NSOffState];
     [nonAsciiDoubleWidth setState:[[dict objectForKey:KEY_AMBIGUOUS_DOUBLE_WIDTH] boolValue] ? NSOnState : NSOffState];
@@ -2904,6 +2918,7 @@ static float versionNumber;
     [flashingBell setState:[[dict objectForKey:KEY_FLASHING_BELL] boolValue] ? NSOnState : NSOffState];
     [xtermMouseReporting setState:[[dict objectForKey:KEY_XTERM_MOUSE_REPORTING] boolValue] ? NSOnState : NSOffState];
     [disableSmcupRmcup setState:[[dict objectForKey:KEY_DISABLE_SMCUP_RMCUP] boolValue] ? NSOnState : NSOffState];
+    [allowTitleReporting setState:[[dict objectForKey:KEY_ALLOW_TITLE_REPORTING] boolValue] ? NSOnState : NSOffState];
     [disablePrinting setState:[[dict objectForKey:KEY_DISABLE_PRINTING] boolValue] ? NSOnState : NSOffState];
     [scrollbackWithStatusBar setState:[[dict objectForKey:KEY_SCROLLBACK_WITH_STATUS_BAR] boolValue] ? NSOnState : NSOffState];
     [scrollbackInAlternateScreen setState:[dict objectForKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN] ? 
@@ -2925,6 +2940,7 @@ static float versionNumber;
     [terminalType setStringValue:[dict objectForKey:KEY_TERMINAL_TYPE]];
     [sendCodeWhenIdle setState:[[dict objectForKey:KEY_SEND_CODE_WHEN_IDLE] boolValue] ? NSOnState : NSOffState];
     [idleCode setIntValue:[[dict objectForKey:KEY_IDLE_CODE] intValue]];
+    [useCanonicalParser setState:[[dict objectForKey:KEY_USE_CANONICAL_PARSER] boolValue] ? NSOnState : NSOffState];
 
     // Keyboard tab
     int rowIndex = [keyMappings selectedRow];
@@ -3301,6 +3317,7 @@ static float versionNumber;
     [newDict setObject:[NSNumber numberWithInt:[[cursorType selectedCell] tag]] forKey:KEY_CURSOR_TYPE];
     [newDict setObject:[NSNumber numberWithBool:([useBoldFont state]==NSOnState)] forKey:KEY_USE_BOLD_FONT];
     [newDict setObject:[NSNumber numberWithBool:([useBrightBold state]==NSOnState)] forKey:KEY_USE_BRIGHT_BOLD];
+    [newDict setObject:[NSNumber numberWithBool:([useItalicFont state]==NSOnState)] forKey:KEY_USE_ITALIC_FONT];
     [newDict setObject:[NSNumber numberWithFloat:[transparency floatValue]] forKey:KEY_TRANSPARENCY];
     [newDict setObject:[NSNumber numberWithFloat:[blend floatValue]] forKey:KEY_BLEND];
     [newDict setObject:[NSNumber numberWithFloat:[blurRadius floatValue]] forKey:KEY_BLUR_RADIUS];
@@ -3311,8 +3328,8 @@ static float versionNumber;
 
     if (sender == backgroundImage) {
         NSString* filename = nil;
-                if ([sender state] == NSOnState) {
-                        filename = [self _chooseBackgroundImage];
+        if ([sender state] == NSOnState) {
+            filename = [self _chooseBackgroundImage];
         }
         if (!filename) {
                         [backgroundImagePreview setImage: nil];
@@ -3321,6 +3338,7 @@ static float versionNumber;
         backgroundImageFilename = filename;
     }
     [newDict setObject:backgroundImageFilename forKey:KEY_BACKGROUND_IMAGE_LOCATION];
+    [newDict setObject:[NSNumber numberWithBool:([backgroundImageTiled state]==NSOnState)] forKey:KEY_BACKGROUND_IMAGE_TILED];
 
     // Terminal tab
     [newDict setObject:[NSNumber numberWithBool:([disableWindowResizing state]==NSOnState)] forKey:KEY_DISABLE_WINDOW_RESIZING];
@@ -3333,6 +3351,7 @@ static float versionNumber;
     [newDict setObject:[NSNumber numberWithBool:([flashingBell state]==NSOnState)] forKey:KEY_FLASHING_BELL];
     [newDict setObject:[NSNumber numberWithBool:([xtermMouseReporting state]==NSOnState)] forKey:KEY_XTERM_MOUSE_REPORTING];
     [newDict setObject:[NSNumber numberWithBool:([disableSmcupRmcup state]==NSOnState)] forKey:KEY_DISABLE_SMCUP_RMCUP];
+    [newDict setObject:[NSNumber numberWithBool:([allowTitleReporting state]==NSOnState)] forKey:KEY_ALLOW_TITLE_REPORTING];
     [newDict setObject:[NSNumber numberWithBool:([disablePrinting state]==NSOnState)] forKey:KEY_DISABLE_PRINTING];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackWithStatusBar state]==NSOnState)] forKey:KEY_SCROLLBACK_WITH_STATUS_BAR];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackInAlternateScreen state]==NSOnState)] forKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN];
@@ -3357,6 +3376,7 @@ static float versionNumber;
     [newDict setObject:[terminalType stringValue] forKey:KEY_TERMINAL_TYPE];
     [newDict setObject:[NSNumber numberWithBool:([sendCodeWhenIdle state]==NSOnState)] forKey:KEY_SEND_CODE_WHEN_IDLE];
     [newDict setObject:[NSNumber numberWithInt:[idleCode intValue]] forKey:KEY_IDLE_CODE];
+    [newDict setObject:[NSNumber numberWithBool:([useCanonicalParser state]==NSOnState)] forKey:KEY_USE_CANONICAL_PARSER];
 
     // Keyboard tab
     [newDict setObject:[origBookmark objectForKey:KEY_KEYBOARD_MAP] forKey:KEY_KEYBOARD_MAP];
@@ -3506,7 +3526,7 @@ static float versionNumber;
         augmented = [NSMutableArray arrayWithArray:jobNames];
         [augmented addObject:@"Job Name"];
     } else {
-        augmented = [NSArray arrayWithObject:@"Job Name"];
+        augmented = [NSMutableArray arrayWithObject:@"Job Name"];
     }
     [dataSource setObject:augmented forKey:KEY_JOBS inBookmark:bookmark];
     [jobsTable_ reloadData];
@@ -3654,21 +3674,21 @@ static float versionNumber;
 }
 
 - (void)forceTextFieldToBeNumber:(NSTextField *)textField
-				 acceptableRange:(NSRange)range
+                                 acceptableRange:(NSRange)range
 {
-	// NSNumberFormatter seems to have lost its mind on Lion. See a description of the problem here:
-	// http://stackoverflow.com/questions/7976951/nsnumberformatter-erasing-value-when-it-violates-constraints
-	int iv = [self intForString:[textField stringValue] inRange:range];
-	unichar lastChar = '0';
-	int numChars = [[textField stringValue] length];
-	if (numChars) {
-		lastChar = [[textField stringValue] characterAtIndex:numChars - 1];
-	}
-	if (iv != [textField intValue] || (lastChar < '0' || lastChar > '9')) {
-		// If the int values don't match up or there are terminal non-number
-		// chars, then update the value.
-		[textField setIntValue:iv];
-	}
+        // NSNumberFormatter seems to have lost its mind on Lion. See a description of the problem here:
+        // http://stackoverflow.com/questions/7976951/nsnumberformatter-erasing-value-when-it-violates-constraints
+        int iv = [self intForString:[textField stringValue] inRange:range];
+        unichar lastChar = '0';
+        int numChars = [[textField stringValue] length];
+        if (numChars) {
+                lastChar = [[textField stringValue] characterAtIndex:numChars - 1];
+        }
+        if (iv != [textField intValue] || (lastChar < '0' || lastChar > '9')) {
+                // If the int values don't match up or there are terminal non-number
+                // chars, then update the value.
+                [textField setIntValue:iv];
+        }
 }
 
 // NSTextField delegate
@@ -3677,13 +3697,13 @@ static float versionNumber;
     id obj = [aNotification object];
     if (obj == wordChars) {
         defaultWordChars = [[wordChars stringValue] retain];
-	} else if (obj == tmuxDashboardLimit) {
-		[self forceTextFieldToBeNumber:tmuxDashboardLimit
-					   acceptableRange:NSMakeRange(0, 1000)];
-		defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
+        } else if (obj == tmuxDashboardLimit) {
+                [self forceTextFieldToBeNumber:tmuxDashboardLimit
+                                           acceptableRange:NSMakeRange(0, 1000)];
+                defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
     } else if (obj == scrollbackLines) {
-		[self forceTextFieldToBeNumber:scrollbackLines
-					   acceptableRange:NSMakeRange(0, 10 * 1000 * 1000)];
+                [self forceTextFieldToBeNumber:scrollbackLines
+                                           acceptableRange:NSMakeRange(0, 10 * 1000 * 1000)];
         [self bookmarkSettingChanged:nil];
     } else if (obj == columnsField ||
                obj == rowsField ||
@@ -3744,6 +3764,26 @@ static float versionNumber;
     [keyPress setStringValue:[iTermKeyBindingMgr formatKeyCombination:keyString]];
 }
 
+// Set the local copy of the hotkey, update the pref panel, and register it after a delay.
+- (void)setHotKeyChar:(unsigned short)keyChar code:(unsigned int)keyCode mods:(unsigned int)keyMods
+{
+    defaultHotkeyChar = keyChar;
+    defaultHotkeyCode = keyCode;
+    defaultHotkeyModifiers = keyMods;
+    [[[PreferencePanel sharedInstance] window] makeFirstResponder:[[PreferencePanel sharedInstance] window]];
+    [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", keyChar, keyMods]]];
+    [self performSelector:@selector(setHotKey) withObject:self afterDelay:0.01];
+}
+
+- (void)sanityCheckHotKey
+{
+    if (!defaultHotkeyChar) {
+        [self setHotKeyChar:' ' code:kVK_Space mods:NSAlternateKeyMask];
+    } else {
+        [self setHotKeyChar:defaultHotkeyChar code:defaultHotkeyCode mods:defaultHotkeyModifiers];
+    }
+}
+
 - (void)hotkeyKeyDown:(NSEvent*)event
 {
     unsigned int keyMods;
@@ -3754,12 +3794,7 @@ static float versionNumber;
     unsigned short keyChar = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
     unsigned int keyCode = [event keyCode];
 
-    defaultHotkeyChar = keyChar;
-    defaultHotkeyCode = keyCode;
-    defaultHotkeyModifiers = keyMods;
-    [[[PreferencePanel sharedInstance] window] makeFirstResponder:[[PreferencePanel sharedInstance] window]];
-    [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", keyChar, keyMods]]];
-    [self performSelector:@selector(setHotKey) withObject:self afterDelay:0.01];
+    [self setHotKeyChar:keyChar code:keyCode mods:keyMods];
 }
 
 - (void)setHotKey
@@ -4284,6 +4319,7 @@ static float versionNumber;
         KEY_CURSOR_TYPE,
         KEY_USE_BOLD_FONT,
         KEY_USE_BRIGHT_BOLD,
+        KEY_USE_ITALIC_FONT,
         KEY_ASCII_ANTI_ALIASED,
         KEY_NONASCII_ANTI_ALIASED,
         KEY_ANTI_ALIASING,
@@ -4301,6 +4337,7 @@ static float versionNumber;
         KEY_BLUR_RADIUS,
         KEY_BLUR,
         KEY_BACKGROUND_IMAGE_LOCATION,
+        KEY_BACKGROUND_IMAGE_TILED,
         KEY_SYNC_TITLE,
         KEY_DISABLE_WINDOW_RESIZING,
         KEY_HIDE_AFTER_OPENING,
@@ -4312,6 +4349,7 @@ static float versionNumber;
         KEY_FLASHING_BELL,
         KEY_XTERM_MOUSE_REPORTING,
         KEY_DISABLE_SMCUP_RMCUP,
+        KEY_ALLOW_TITLE_REPORTING,
         KEY_DISABLE_PRINTING,
         KEY_CHARACTER_ENCODING,
         KEY_SCROLLBACK_LINES,
@@ -4319,6 +4357,7 @@ static float versionNumber;
         KEY_SCROLLBACK_IN_ALTERNATE_SCREEN,
         KEY_UNLIMITED_SCROLLBACK,
         KEY_TERMINAL_TYPE,
+        KEY_USE_CANONICAL_PARSER,
         nil
     };
     NSString *sessionKeys[] = {

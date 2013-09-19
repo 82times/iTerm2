@@ -94,6 +94,7 @@ static NSString* TAB_ARRANGEMENT_IS_ACTIVE = @"Is Active";
 static NSString* TAB_ARRANGEMENT_ID = @"ID";  // only for maximize/unmaximize
 static NSString* TAB_ARRANGEMENT_IS_MAXIMIZED = @"Maximized";
 static NSString* TAB_ARRANGEMENT_TMUX_WINDOW_PANE = @"tmux window pane";
+static NSString* TAB_ARRANGEMENT_COLOR = @"Tab color";
 
 static const BOOL USE_THIN_SPLITTERS = YES;
 
@@ -406,8 +407,22 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return [sv session];
 }
 
+- (void)sanityCheckViewOrder {
+    // I've seen an occasional crash where we try to dereference an empty viewOrder array. I can't
+    // see why it happens, so we should at least be able to recover from it.
+    if ([viewOrder_ count] < currentViewIndex_) {
+        NSLog(@"View order %@ fails sanity check at %@", viewOrder_, [NSThread callStackSymbols]);
+        [viewOrder_ removeAllObjects];
+        for (SessionView *view in [self sessionViews]) {
+            [viewOrder_ addObject:[NSNumber numberWithInt:[view viewId]]];
+        }
+        currentViewIndex_ = 0;
+    }
+}
+
 - (SessionView *)_savedViewWithId:(int)i
 {
+    [self sanityCheckViewOrder];
     for (NSNumber *k in idMap_) {
         SessionView *cur = [idMap_ objectForKey:k];
         if ([cur viewId] == [[viewOrder_ objectAtIndex:i] intValue]) {
@@ -429,6 +444,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
         [root_ replaceSubview:[[root_ subviews] objectAtIndex:0]
                          with:sv];
     } else {
+        [self sanityCheckViewOrder];
         sv = [self _recursiveSessionViewWithId:[[viewOrder_ objectAtIndex:currentViewIndex_] intValue]
                                         atNode:root_];
     }
@@ -450,6 +466,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
         [root_ replaceSubview:[[root_ subviews] objectAtIndex:0]
                          with:sv];
     } else {
+        [self sanityCheckViewOrder];
         sv = [self _recursiveSessionViewWithId:[[viewOrder_ objectAtIndex:currentViewIndex_] intValue]
                                         atNode:root_];
     }
@@ -1128,18 +1145,20 @@ static NSString* FormatRect(NSRect r) {
 - (void)fitSubviewsToRoot
 {
     // Make SessionViews full-size.
-        [root_ adjustSubviews];
+    [root_ adjustSubviews];
 
-        // Make scrollbars the right size and put them at the tops of their session views.
-        for (PTYSession *theSession in [self sessions]) {
-                NSSize theSize = [theSession idealScrollViewSize];
-                [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
-                                                                                                         0,
-                                                                                                         theSize.width,
-                                                                                                         theSize.height)];
-                [[theSession view] setAutoresizesSubviews:NO];
-                [[theSession view] updateTitleFrame];
+    // Make scrollbars the right size and put them at the tops of their session views.
+    for (PTYSession *theSession in [self sessions]) {
+        NSSize theSize = [theSession idealScrollViewSizeWithStyle:[parentWindow_ scrollerStyle]];
+        [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
+                                                     0,
+                                                     theSize.width,
+                                                     theSize.height)];
+        if ([self isTmuxTab]) {
+            [[theSession view] setAutoresizesSubviews:NO];
         }
+        [[theSession view] updateTitleFrame];
+    }
 }
 
 - (void)removeSession:(PTYSession*)aSession
@@ -1335,11 +1354,14 @@ static NSString* FormatRect(NSRect r) {
     size.width = columns * charWidth + MARGIN * 2;
     size.height = rows * lineHeight + VMARGIN * 2;
 
-    BOOL hasScrollbar = ![term anyFullScreen] && ![[PreferencePanel sharedInstance] hideScrollbar];
-    NSSize outerSize = [PTYScrollView frameSizeForContentSize:size
-                                        hasHorizontalScroller:NO
-                                          hasVerticalScroller:hasScrollbar
-                                                   borderType:NSNoBorder];
+    BOOL hasScrollbar = [term scrollbarShouldBeVisible];
+    NSSize outerSize =
+        [PTYScrollView frameSizeForContentSize:size
+                       horizontalScrollerClass:nil
+                         verticalScrollerClass:hasScrollbar ? [PTYScroller class] : nil
+                                    borderType:NSNoBorder
+                                   controlSize:NSRegularControlSize
+                                 scrollerStyle:[term scrollerStyle]];
     if (showTitles) {
         outerSize.height += [SessionView titleHeight];
     }
@@ -1363,11 +1385,14 @@ static NSString* FormatRect(NSRect r) {
     size.width = MIN_SESSION_COLUMNS * [[session TEXTVIEW] charWidth] + MARGIN * 2;
     size.height = MIN_SESSION_ROWS * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
 
-    BOOL hasScrollbar = ![parentWindow_ anyFullScreen] && ![[PreferencePanel sharedInstance] hideScrollbar];
-    NSSize scrollViewSize = [PTYScrollView frameSizeForContentSize:size
-                                             hasHorizontalScroller:NO
-                                               hasVerticalScroller:hasScrollbar
-                                                        borderType:NSNoBorder];
+    BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
+    NSSize scrollViewSize =
+        [PTYScrollView frameSizeForContentSize:size
+                       horizontalScrollerClass:nil
+                         verticalScrollerClass:hasScrollbar ? [PTYScroller class] : nil
+                                    borderType:NSNoBorder
+                                   controlSize:NSRegularControlSize
+                                 scrollerStyle:[parentWindow_ scrollerStyle]];
     return scrollViewSize;
 }
 
@@ -1728,7 +1753,7 @@ static NSString* FormatRect(NSRect r) {
 {
     PtyLog(@"PTYTab fitSessionToCurrentViewSzie");
     PtyLog(@"fitSessionToCurrentViewSize begins");
-    BOOL hasScrollbar = ![parentWindow_ anyFullScreen] && ![[PreferencePanel sharedInstance] hideScrollbar];
+    BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
     [[aSession SCROLLVIEW] setHasVerticalScroller:hasScrollbar];
     NSSize size = [[aSession view] maximumPossibleScrollViewContentSize];
     int width = (size.width - MARGIN*2) / [[aSession TEXTVIEW] charWidth];
@@ -1923,7 +1948,6 @@ static NSString* FormatRect(NSRect r) {
 
 + (void)_recursiveDrawArrangementPreview:(NSDictionary*)arrangement frame:(NSRect)frame
 {
-    NSLog(@"Frame=%@", [NSValue valueWithRect:frame]);
     if ([[arrangement objectForKey:TAB_ARRANGEMENT_VIEW_TYPE] isEqualToString:VIEW_TYPE_SPLITTER]) {
         BOOL isVerticalSplitter = [[arrangement objectForKey:SPLITTER_IS_VERTICAL] boolValue];
         float xExtent = 0;
@@ -2085,7 +2109,7 @@ static NSString* FormatRect(NSRect r) {
     assert(!flexibleView_);
     // Interpose a vew between the tab and the root so the root can be smaller than the tab.
     flexibleView_ = [[SolidColorView alloc] initWithFrame:root_.frame
-                                                                                           color:[self flexibleViewColor]];
+                                                    color:[self flexibleViewColor]];
     [flexibleView_ setFlipped:YES];
     tabView_ = flexibleView_;
     [root_ setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
@@ -2108,14 +2132,36 @@ static NSString* FormatRect(NSRect r) {
   [self updateFlexibleViewColors];
   [flexibleView_ setFrameSize:[[realParentWindow_ tabView] frame].size];
   for (PTYSession *aSession in [self sessions]) {
-    [[aSession view] setAutoresizesSubviews:NO];
+    [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it is a tmux tab
     [[aSession view] updateTitleFrame];
   }
 }
 
++ (NSString *)htmlNameForColor:(NSColor *)color {
+    return [NSString stringWithFormat:@"%02x%02x%02x",
+            (int) (color.redComponent * 255.0),
+            (int) (color.greenComponent * 255.0),
+            (int) (color.blueComponent * 255.0)];
+}
+
++ (NSColor *)colorForHtmlName:(NSString *)name {
+    if (!name || [name length] != 6) {
+        return nil;
+    }
+    unsigned int i;
+    [[NSScanner scannerWithString:name] scanHexInt:&i];
+    CGFloat r = (i >> 16) & 0xff;
+    CGFloat g = (i >> 8) & 0xff;
+    CGFloat b = (i >> 0) & 0xff;
+    return [NSColor colorWithCalibratedRed:r / 255.0
+                                     green:g / 255.0
+                                      blue:b / 255.0
+                                     alpha:1.0];
+}
+
 + (PTYTab *)tabWithArrangement:(NSDictionary*)arrangement
-                                        inTerminal:(PseudoTerminal*)term
-                           hasFlexibleView:(BOOL)hasFlexible
+                    inTerminal:(PseudoTerminal*)term
+               hasFlexibleView:(BOOL)hasFlexible
 {
     PTYTab* theTab;
     // Build a tree with splitters and SessionViews but no PTYSessions.
@@ -2161,6 +2207,13 @@ static NSString* FormatRect(NSRect r) {
 
     [self numberOfSessionsDidChange];
     [term setDimmingForSessions];
+
+    NSColor *tabColor;
+    NSString *colorName = [arrangement objectForKey:TAB_ARRANGEMENT_COLOR];
+    tabColor = [[self class] colorForHtmlName:colorName];
+    if (tabColor) {
+        [term setTabColor:tabColor forTabViewItem:tabViewItem_];
+    }
 }
 
 + (PTYTab *)openTabWithArrangement:(NSDictionary*)arrangement
@@ -2183,6 +2236,10 @@ static NSString* FormatRect(NSRect r) {
         [self unmaximize];
     }
     [result setObject:[self _recursiveArrangement:root_ idMap:idMap isMaximized:temp] forKey:TAB_ARRANGEMENT_ROOT];
+    NSColor *color = [[realParentWindow_ tabBarControl] tabColorForTabViewItem:tabViewItem_];
+    if (color) {
+        [result setObject:[[self class] htmlNameForColor:color] forKey:TAB_ARRANGEMENT_COLOR];
+    }
     if (temp) {
         [self maximize];
     }
@@ -2336,6 +2393,18 @@ static NSString* FormatRect(NSRect r) {
     return tmuxWindow_;
 }
 
+- (NSString *)tmuxWindowName
+{
+    return tmuxWindowName_ ? tmuxWindowName_ : @"tmux";
+}
+
+- (void)setTmuxWindowName:(NSString *)tmuxWindowName
+{
+    [tmuxWindowName_ autorelease];
+    tmuxWindowName_ = [tmuxWindowName retain];
+    [[self realParentWindow] setWindowTitle];
+}
+
 + (Profile *)tmuxBookmark
 {
     Profile *bookmark = [[ProfileModel sharedInstance] bookmarkWithName:@"tmux"];
@@ -2437,7 +2506,7 @@ static NSString* FormatRect(NSRect r) {
     theTab->parseTree_ = [parseTree retain];
     // The only way a tmux view should resize is because the server told it to.
     for (PTYSession *aSession in [theTab sessions]) {
-        [[aSession view] setAutoresizesSubviews:NO];
+        [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it's a tmux tab
     }
     [theTab addToTerminal:term
           withArrangement:arrangement];
@@ -2580,9 +2649,10 @@ static NSString* FormatRect(NSRect r) {
                       tmuxSize.height - overage.height);
 }
 
-// Returns the size (in characters) of the minimum window size that can contain
-// this tab. It picks the smallest height that can contain every column and
-// every row (counting characters and dividers as 1).
+// Returns the size (in characters) of the window size that fits this tab's
+// contents, while going over as little as possible.  It picks the smallest
+// height that can contain every column and every row (counting characters and
+// dividers as 1).
 - (NSSize)tmuxSize
 {
     // The current size of the sessions in this tab in characters
@@ -2598,8 +2668,13 @@ static NSString* FormatRect(NSRect r) {
     // For now, we work around this problem with respect to scrollbars by handling them specially.
     NSSize rootSizeChars = NSMakeSize([self tmuxSizeForHeight:NO], [self tmuxSizeForHeight:YES]);
 
-    // The size in pixels we need to get it to (at most)
-    NSSize targetSizePixels = [tabView_ frame].size;
+    // The size in pixels we need to get it to (at most). Only the current tab will have the proper
+    // frame, but during window creation there might not be a current tab.
+    PTYTab *currentTab = [realParentWindow_ currentTab];
+    if (!currentTab) {
+        currentTab = self;
+    }
+    NSSize targetSizePixels = [currentTab->tabView_ frame].size;
 
     // The current size in pixels
     NSSize rootSizePixels = [root_ frame].size;
@@ -2663,6 +2738,7 @@ static NSString* FormatRect(NSRect r) {
     return [self _recursiveParseTree:parseTree matchesViewHierarchy:view];
 }
 
+// NOTE: This is only called on tmux tabs.
 - (void)_recursiveResizeViewsInViewHierarchy:(NSView *)view
                               forArrangement:(NSDictionary *)arrangement
 {
@@ -2688,17 +2764,17 @@ static NSString* FormatRect(NSRect r) {
         SessionView *sv = (SessionView *)view;
         PTYSession *theSession = [sv session];
         [theSession resizeFromArrangement:[arrangement objectForKey:TAB_ARRANGEMENT_SESSION]];
-                assert([arrangement objectForKey:TAB_ARRANGEMENT_SESSIONVIEW_FRAME]);
+        assert([arrangement objectForKey:TAB_ARRANGEMENT_SESSIONVIEW_FRAME]);
 
-                NSRect aFrame = [PTYTab dictToFrame:[arrangement objectForKey:TAB_ARRANGEMENT_SESSIONVIEW_FRAME]];
-                [sv setFrame:aFrame];
-                NSSize theSize = [theSession idealScrollViewSize];
-                [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
-                                                                                                         0,
-                                                                                                         theSize.width,
-                                                                                                         theSize.height)];
-                [[theSession view] setAutoresizesSubviews:NO];
-                [[theSession view] updateTitleFrame];
+        NSRect aFrame = [PTYTab dictToFrame:[arrangement objectForKey:TAB_ARRANGEMENT_SESSIONVIEW_FRAME]];
+        [sv setFrame:aFrame];
+        NSSize theSize = [theSession idealScrollViewSizeWithStyle:[parentWindow_ scrollerStyle]];
+        [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
+                                                     0,
+                                                     theSize.width,
+                                                     theSize.height)];
+        [[theSession view] setAutoresizesSubviews:NO];
+        [[theSession view] updateTitleFrame];
     }
 }
 
@@ -2947,9 +3023,9 @@ static NSString* FormatRect(NSRect r) {
         // Don't care for non-tmux tabs.
         return;
     }
-        for (SessionView *sv in [self sessionViews]) {
-                [sv setAutoresizesSubviews:NO];
-        }
+    for (SessionView *sv in [self sessionViews]) {
+        [sv setAutoresizesSubviews:NO];
+    }
     // Find a session view adjacent to the moved splitter.
     NSArray *subviews = [splitView subviews];
     NSView *theView = [subviews objectAtIndex:splitterIndex];  // the view right of or below the dragged splitter.
@@ -2971,9 +3047,11 @@ static NSString* FormatRect(NSRect r) {
 
     // Ask the tmux server to perform the move and we'll update our layout when
     // it finishes.
-    [tmuxController_ windowPane:[session tmuxPane]
-                      resizedBy:amount
-                   horizontally:[splitView isVertical]];
+    if (amount != 0) {
+        [tmuxController_ windowPane:[session tmuxPane]
+                          resizedBy:amount
+                       horizontally:[splitView isVertical]];
+    }
 }
 
 // Prevent any session from becoming smaller than its minimum size because of
@@ -2985,7 +3063,7 @@ static NSString* FormatRect(NSRect r) {
         // perfect.
         return proposedMin;
     }
-    PtyLog(@"PTYTab constrainMin:%f divider:%d", (float)proposedMin, dividerIndex);
+    PtyLog(@"PTYTab constrainMin:%f divider:%d", (float)proposedMin, (int)dividerIndex);
     CGFloat dim;
     NSSize minSize = [self _minSizeOfView:[[splitView subviews] objectAtIndex:dividerIndex]];
     if ([splitView isVertical]) {
@@ -3005,7 +3083,7 @@ static NSString* FormatRect(NSRect r) {
         // perfect.
         return proposedMax;
     }
-    PtyLog(@"PTYTab constrainMax:%f divider:%d", (float)proposedMax, dividerIndex);
+    PtyLog(@"PTYTab constrainMax:%f divider:%d", (float)proposedMax, (int)dividerIndex);
     CGFloat dim;
     NSSize minSize = [self _minSizeOfView:[[splitView subviews] objectAtIndex:dividerIndex+1]];
     if ([splitView isVertical]) {
@@ -3660,7 +3738,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     if (tmuxOriginatedResizeInProgress_) {
         return proposedPosition;
     }
-    PtyLog(@"PTYTab splitView:constraintSplitPosition%f divider:%d case ", (float)proposedPosition, dividerIndex);
+    PtyLog(@"PTYTab splitView:constraintSplitPosition%f divider:%d case ", (float)proposedPosition, (int)dividerIndex);
     NSArray* subviews = [splitView subviews];
     NSView* childBefore = [subviews objectAtIndex:dividerIndex];
     NSView* childAfter = [subviews objectAtIndex:dividerIndex + 1];

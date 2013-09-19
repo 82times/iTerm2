@@ -30,6 +30,7 @@
 #import <Foundation/Foundation.h>
 #import <Cocoa/Cocoa.h>
 #import "ProfileModel.h"
+#import "FutureMethods.h"
 
 // Prefs-level keys
 #define KEY_DEFAULT_GUID                @"Default Bookmark Guid"  // use this instead (not in a bookmark)
@@ -114,6 +115,7 @@
 #define KEY_DISABLE_BOLD           @"Disable Bold"  // DEPRECATED
 #define KEY_USE_BOLD_FONT          @"Use Bold Font"
 #define KEY_USE_BRIGHT_BOLD        @"Use Bright Bold"
+#define KEY_USE_ITALIC_FONT        @"Use Italic Font"
 #define KEY_TRANSPARENCY           @"Transparency"
 #define KEY_BLEND                  @"Blend"
 #define KEY_BLUR                   @"Blur"
@@ -122,6 +124,7 @@
 #define KEY_ASCII_ANTI_ALIASED     @"ASCII Anti Aliased"
 #define KEY_NONASCII_ANTI_ALIASED  @"Non-ASCII Anti Aliased"
 #define KEY_BACKGROUND_IMAGE_LOCATION @"Background Image Location"
+#define KEY_BACKGROUND_IMAGE_TILED @"Background Image Is Tiled"
 
 // Terminal
 #define KEY_DISABLE_WINDOW_RESIZING           @"Disable Window Resizing"
@@ -135,6 +138,7 @@
 #define KEY_FLASHING_BELL                     @"Flashing Bell"
 #define KEY_XTERM_MOUSE_REPORTING             @"Mouse Reporting"
 #define KEY_DISABLE_SMCUP_RMCUP               @"Disable Smcup Rmcup"
+#define KEY_ALLOW_TITLE_REPORTING             @"Allow Title Reporting"
 #define KEY_DISABLE_PRINTING                  @"Disable Printing"
 #define KEY_SCROLLBACK_WITH_STATUS_BAR        @"Scrollback With Status Bar"
 #define KEY_SCROLLBACK_IN_ALTERNATE_SCREEN    @"Scrollback in Alternate Screen"
@@ -144,6 +148,7 @@
 #define KEY_SCROLLBACK_LINES                  @"Scrollback Lines"
 #define KEY_UNLIMITED_SCROLLBACK              @"Unlimited Scrollback"
 #define KEY_TERMINAL_TYPE                     @"Terminal Type"
+#define KEY_USE_CANONICAL_PARSER              @"Use Canonical Parser"
 
 // Session
 #define KEY_AUTOLOG                           @"Automatically Log"
@@ -171,6 +176,7 @@
 #define WINDOW_TYPE_LION_FULL_SCREEN 4  // Lion-native fullscreen
 #define WINDOW_TYPE_BOTTOM 5
 #define WINDOW_TYPE_LEFT 6
+#define WINDOW_TYPE_RIGHT 7
 
 typedef enum {
   iTermWindowObject,
@@ -192,7 +198,7 @@ typedef enum {
 @interface ITAddressBookMgr (Private)
 
 + (id)sharedInstance;
-+ (NSArray*)encodeColor:(NSColor*)origColor;
++ (NSDictionary*)encodeColor:(NSColor*)origColor;
 + (NSColor*)decodeColor:(NSDictionary*)plist;
 + (void)setDefaultsInBookmark:(NSMutableDictionary*)aDict;
 
@@ -214,10 +220,8 @@ typedef enum {
 - (void)netServiceDidStop:(NSNetService *)aNetService;
 - (NSString*) getBonjourServiceType:(NSString*)aType;
 + (NSString*)loginShellCommandForBookmark:(Profile*)bookmark
-							 asLoginShell:(BOOL*)asLoginShell
 							forObjectType:(iTermObjectType)objectType;
 + (NSString*)bookmarkCommand:(Profile*)bookmark
-			  isLoginSession:(BOOL*)isLoginSession
 			   forObjectType:(iTermObjectType)objectType;
 + (NSString*)bookmarkWorkingDirectory:(Profile*)bookmark
                         forObjectType:(iTermObjectType)objectType;

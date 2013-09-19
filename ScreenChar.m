@@ -41,6 +41,12 @@ static int ccmNextKey = 1;
 // strings before creating a new one with a recycled code.
 static BOOL hasWrapped = NO;
 
+@implementation ScreenCharArray
+@synthesize line = _line;
+@synthesize length = _length;
+@synthesize eol = _eol;
+@end
+
 NSString* ComplexCharToStr(int key)
 {
     if (key == UNICODE_REPLACEMENT_CHAR) {
@@ -333,6 +339,10 @@ NSString* CharArrayToString(unichar* charHaystack, int o)
                                            length:o * sizeof(unichar)
                                          encoding:encoding
                                      freeWhenDone:NO] autorelease];
+}
+
+void DumpScreenCharArray(screen_char_t* screenChars, int lineLength) {
+    NSLog(@"%@", ScreenCharArrayToStringDebug(screenChars, lineLength));
 }
 
 NSString* ScreenCharArrayToStringDebug(screen_char_t* screenChars,

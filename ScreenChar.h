@@ -30,6 +30,7 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import "NSStringITerm.h"
 
 // This is used in the rightmost column when a double-width character would
 // have been split in half and was wrapped to the next line. It is nonprintable
@@ -62,10 +63,7 @@
 #define ITERM2_PRIVATE_BEGIN 0xf000
 #define ITERM2_PRIVATE_END 0xf003
 
-// This is the standard unicode replacement character for when input couldn't
-// be parsed properly but we need to render something there.
-#define UNICODE_REPLACEMENT_CHAR 0xfffd
-#define ONECHAR_UNKNOWN ('?')   // Used for encodings other than utf-8.
+#define ONECHAR_UNKNOWN ('?')   // Relacement character for encodings other than utf-8.
 
 // Alternate semantics definitions
 // Default background color
@@ -79,6 +77,12 @@
 
 // Max unichars in a glyph.
 static const int kMaxParts = 20;
+
+typedef enum {
+    ColorModeNormal = 0,
+    ColorModeAlternate = 1,
+    ColorMode24bit = 2
+} ColorMode;
 
 typedef struct screen_char_t
 {
@@ -106,11 +110,21 @@ typedef struct screen_char_t
     //         to brightest 255 (not white).
     // With alternate background semantics:
     //   ALTSEM_xxx (see comments above)
-    unsigned int backgroundColor : 8;
-    unsigned int foregroundColor : 8;
+    // With 24-bit semantics:
+    //   foreground/backgroundColor gives red component and fg/bgGreen, fg/bgBlue
+    //     give the rest of the color's components
 
-    // This flag determines the interpretation of backgroundColor.
-    unsigned int alternateBackgroundSemantics : 1;
+    unsigned int foregroundColor : 8;
+    unsigned int fgGreen : 8;
+    unsigned int fgBlue  : 8;
+
+    unsigned int backgroundColor : 8;
+    unsigned int bgGreen : 8;
+    unsigned int bgBlue  : 8;
+
+    // These determine the interpretation of foreground/backgroundColor.
+    unsigned int foregroundColorMode : 2;
+    unsigned int backgroundColorMode : 2;
 
     // If set, the 'code' field does not give a utf-16 value but is intead a
     // key into a string table of more complex chars (combined, surrogate pairs,
@@ -118,20 +132,30 @@ typedef struct screen_char_t
     // be recycled as needed.
     unsigned int complexChar : 1;
 
-    // Foreground color has the same definition as background color.
-    unsigned int alternateForegroundSemantics : 1;
-
     // Various bits affecting text appearance. The bold flag here is semantic
     // and may be rendered as some combination of font choice and color
     // intensity.
     unsigned int bold : 1;
+    unsigned int italic : 1;
     unsigned int blink : 1;
     unsigned int underline : 1;
-   
-    // These bits aren't used by are defined here so that the entire memory
+
+    // These bits aren't used but are defined here so that the entire memory
     // region can be initialized.
-    unsigned int unused : 26;
+    unsigned int unused : 7;
 } screen_char_t;
+
+// Typically used to store a single screen line.
+@interface ScreenCharArray : NSObject {
+    screen_char_t *_line;  // Array of chars
+    int _length;  // Number of chars in _line
+    int _eol;  // EOL_SOFT, EOL_HARD, or EOL_DWC
+}
+
+@property (nonatomic, assign) screen_char_t *line;  // Assume const unless instructed otherwise
+@property (nonatomic, assign) int length;
+@property (nonatomic, assign) int eol;
+@end
 
 // Standard unicode replacement string. Is a double-width character.
 static inline NSString* ReplacementString()
@@ -144,36 +168,80 @@ static inline NSString* ReplacementString()
 static inline void CopyForegroundColor(screen_char_t* to, const screen_char_t from)
 {
     to->foregroundColor = from.foregroundColor;
-    to->alternateForegroundSemantics = from.alternateForegroundSemantics;
+    to->fgGreen = from.fgGreen;
+    to->fgBlue = from.fgBlue;
+    to->foregroundColorMode = from.foregroundColorMode;
     to->bold = from.bold;
+    to->italic = from.italic;
     to->blink = from.blink;
     to->underline = from.underline;
 }
 
-// COpy background color from one char to another.
+// Copy background color from one char to another.
 static inline void CopyBackgroundColor(screen_char_t* to, const screen_char_t from)
 {
     to->backgroundColor = from.backgroundColor;
-    to->alternateBackgroundSemantics = from.alternateBackgroundSemantics;
+    to->bgGreen = from.bgGreen;
+    to->bgBlue = from.bgBlue;
+    to->backgroundColorMode = from.backgroundColorMode;
 }
 
 // Returns true iff two background colors are equal.
 static inline BOOL BackgroundColorsEqual(const screen_char_t a,
                                          const screen_char_t b)
 {
-    return a.backgroundColor == b.backgroundColor &&
-    a.alternateBackgroundSemantics == b.alternateBackgroundSemantics;
+    if (a.backgroundColorMode == b.backgroundColorMode) {
+        if (a.backgroundColorMode != ColorMode24bit) {
+            // for normal and alternate ColorMode
+            return a.backgroundColor == b.backgroundColor;
+        } else {
+            // RGB must all be equal for 24bit color
+            return a.backgroundColor == b.backgroundColor &&
+                a.bgGreen == b.bgGreen &&
+                a.bgBlue == b.bgBlue;
+        }
+    } else {
+        // different ColorMode == different colors
+        return NO;
+    }
 }
 
 // Returns true iff two foreground colors are equal.
-static inline BOOL ForegroundColorsEqual(const screen_char_t a,
-                                         const screen_char_t b)
+static inline BOOL ForegroundAttributesEqual(const screen_char_t a,
+                                             const screen_char_t b)
 {
-    return a.foregroundColor == b.foregroundColor &&
-           a.alternateForegroundSemantics == b.alternateForegroundSemantics &&
-           a.bold == b.bold &&
-           a.blink == b.blink &&
-           a.underline == b.underline;
+    if (a.bold != b.bold ||
+        a.italic != b.italic ||
+        a.blink != b.blink ||
+        a.underline != b.underline) {
+        return NO;
+    }
+    if (a.foregroundColorMode == b.foregroundColorMode) {
+        if (a.foregroundColorMode != ColorMode24bit) {
+            // for normal and alternate ColorMode
+            return a.foregroundColor == b.foregroundColor;
+        } else {
+            // RGB must all be equal for 24bit color
+            return a.foregroundColor == b.foregroundColor &&
+                a.fgGreen == b.fgGreen &&
+                a.fgBlue == b.fgBlue;
+        }
+    } else {
+        // different ColorMode == different colors
+        return NO;
+    }
+}
+
+static inline BOOL ScreenCharHasDefaultAttributesAndColors(const screen_char_t s) {
+    return (s.backgroundColor == ALTSEM_BG_DEFAULT &&
+            s.foregroundColor == ALTSEM_FG_DEFAULT &&
+            s.backgroundColorMode == ColorModeAlternate &&
+            s.foregroundColorMode == ColorModeAlternate &&
+            !s.complexChar &&
+            !s.bold &&
+            !s.italic &&
+            !s.blink &&
+            !s.underline);
 }
 
 // Look up the string associated with a complex char's key.
@@ -235,3 +303,5 @@ NSString* ScreenCharArrayToStringDebug(screen_char_t* screenChars,
 
 // Convert an array of chars to a string, quickly.
 NSString* CharArrayToString(unichar* charHaystack, int o);
+
+void DumpScreenCharArray(screen_char_t* screenChars, int lineLength);

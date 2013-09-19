@@ -41,8 +41,10 @@
 #import "ColorsMenuItemView.h"
 #import "iTermFontPanel.h"
 #import "PseudoTerminalRestorer.h"
+#import "ToastWindowController.h"
 #include <unistd.h>
 #include <sys/stat.h>
+#import <objc/runtime.h>
 
 static NSString *APP_SUPPORT_DIR = @"~/Library/Application Support/iTerm";
 static NSString *SCRIPT_DIRECTORY = @"~/Library/Application Support/iTerm/Scripts";
@@ -112,7 +114,7 @@ static BOOL hasBecomeActive = NO;
         // while compiling against the 10.5 SDK.
 
         // presentationOptions =  [NSApp presentationOptions]
-        NSMethodSignature *presentationOptionsSignature = [NSApp->isa
+        NSMethodSignature *presentationOptionsSignature = [object_getClass(NSApp)
             instanceMethodSignatureForSelector:@selector(presentationOptions)];
         NSInvocation *presentationOptionsInvocation = [NSInvocation
             invocationWithMethodSignature:presentationOptionsSignature];
@@ -127,7 +129,7 @@ static BOOL hasBecomeActive = NO;
         presentationOptions &= ~antiflags;
 
         // [NSAppObj setPresentationOptions:presentationOptions];
-        NSMethodSignature *setSig = [NSApp->isa instanceMethodSignatureForSelector:@selector(setPresentationOptions:)];
+        NSMethodSignature *setSig = [object_getClass(NSApp) instanceMethodSignatureForSelector:@selector(setPresentationOptions:)];
         NSInvocation *setInv = [NSInvocation invocationWithMethodSignature:setSig];
         [setInv setTarget:NSApp];
         [setInv setSelector:@selector(setPresentationOptions:)];
@@ -310,7 +312,8 @@ static BOOL hasBecomeActive = NO;
                              kCFPreferencesCurrentApplication);
 
     PreferencePanel* ppanel = [PreferencePanel sharedInstance];
-    if ([ppanel hotkey]) {
+    // Code could be 0 (e.g., A on an American keyboard) and char is also sometimes 0 (seen in bug 2501).
+    if ([ppanel hotkey] && ([ppanel hotkeyCode] || [ppanel hotkeyChar])) {
         [[iTermController sharedInstance] registerHotkey:[ppanel hotkeyCode] modifiers:[ppanel hotkeyModifiers]];
     }
     if ([ppanel isAnyModifierRemapped]) {
@@ -444,6 +447,15 @@ static BOOL hasBecomeActive = NO;
     [[iTermController sharedInstance] stopEventTap];
 }
 
+- (PseudoTerminal *)terminalToOpenFileIn
+{
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"OpenFileInNewWindows"]) {
+        return nil;
+    } else {
+        return [self currentTerminal];
+    }
+}
+
 /**
  * The following applescript invokes this method before
  * _performStartupActivites is run and prevents it from being run. Scripts can
@@ -474,13 +486,13 @@ static BOOL hasBecomeActive = NO;
         [[NSFileManager defaultManager] fileExistsAtPath:filename isDirectory:&isDir];
         if (!isDir) {
             NSString *aString = [NSString stringWithFormat:@"%@; exit;\n", [filename stringWithEscapedShellCharacters]];
-            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self currentTerminal]];
+            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self terminalToOpenFileIn]];
             // Sleeping a while waiting for the login.
             sleep(1);
             [[[[iTermController sharedInstance] currentTerminal] currentSession] insertText:aString];
         } else {
             NSString *aString = [NSString stringWithFormat:@"cd %@\n", [filename stringWithEscapedShellCharacters]];
-            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self currentTerminal]];
+            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self terminalToOpenFileIn]];
             // Sleeping a while waiting for the login.
             sleep(1);
             [[[[iTermController sharedInstance] currentTerminal] currentSession] insertText:aString];
@@ -502,12 +514,20 @@ static BOOL hasBecomeActive = NO;
     return YES;
 }
 
+- (void)userDidInteractWithASession
+{
+    userHasInteractedWithAnySession_ = YES;
+}
+
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app
 {
-    NSNumber* pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"MinRunningTime"];
-    const double kMinRunningTime =  pref ? [pref floatValue] : 10;
-    if ([[NSDate date] timeIntervalSinceDate:launchTime_] < kMinRunningTime) {
-        return NO;
+    if (!userHasInteractedWithAnySession_) {
+        NSNumber* pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"MinRunningTime"];
+        const double kMinRunningTime =  pref ? [pref floatValue] : 10;
+        if ([[NSDate date] timeIntervalSinceDate:launchTime_] < kMinRunningTime) {
+            NSLog(@"Not quitting iTerm2 because it ran very briefly and had no user interaction. Set the MinRunningTime float preference to 0 to turn this feature off.");
+            return NO;
+        }
     }
     quittingBecauseLastWindowClosed_ = [[PreferencePanel sharedInstance] quitWhenAllWindowsClosed];
     return quittingBecauseLastWindowClosed_;
@@ -541,6 +561,19 @@ static BOOL hasBecomeActive = NO;
 
 - (void)applicationDidChangeScreenParameters:(NSNotification *)aNotification
 {
+    // The screens' -visibleFrame is not updated when this is called. Doing a delayed perform with
+    // a delay of 0 is usually, but not always enough. Not that 1 second is always enough either,
+    // I suppose, but I don't want to die on this hill.
+    NSNumber *delay = [[NSUserDefaults standardUserDefaults] objectForKey:@"UpdateScreenParamsDelay"];
+    if (!delay) {
+        delay = [NSNumber numberWithInt:1];
+    }
+    [self performSelector:@selector(updateScreenParametersInAllTerminals)
+               withObject:nil
+               afterDelay:[delay intValue]];
+}
+
+- (void)updateScreenParametersInAllTerminals {
     // Make sure that all top-of-screen windows are the proper width.
     for (PseudoTerminal* term in [self terminals]) {
         [term screenParametersDidChange];
@@ -765,7 +798,7 @@ static BOOL hasBecomeActive = NO;
     }
 }
 
-- (void) dealloc
+- (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 
@@ -780,7 +813,7 @@ static BOOL hasBecomeActive = NO;
 
 - (IBAction)newWindow:(id)sender
 {
-    [[iTermController sharedInstance] newWindow:sender];
+    [[iTermController sharedInstance] newWindow:sender possiblyTmux:YES];
 }
 
 - (IBAction)newSessionWithSameProfile:(id)sender
@@ -790,16 +823,17 @@ static BOOL hasBecomeActive = NO;
 
 - (IBAction)newSession:(id)sender
 {
-    [[iTermController sharedInstance] newSession:sender];
+    DLog(@"iTermApplicationDelegate newSession:");
+    [[iTermController sharedInstance] newSession:sender possiblyTmux:YES];
 }
 
 // navigation
-- (IBAction) previousTerminal: (id) sender
+- (IBAction)previousTerminal:(id)sender
 {
     [[iTermController sharedInstance] previousTerminal:sender];
 }
 
-- (IBAction) nextTerminal: (id) sender
+- (IBAction)nextTerminal:(id)sender
 {
     [[iTermController sharedInstance] nextTerminal:sender];
 }
@@ -909,17 +943,99 @@ static BOOL hasBecomeActive = NO;
 }
 
 // font control
-- (IBAction) biggerFont: (id) sender
+- (IBAction)biggerFont: (id) sender
 {
     [[[[iTermController sharedInstance] currentTerminal] currentSession] changeFontSizeDirection:1];
 }
 
-- (IBAction) smallerFont: (id) sender
+- (IBAction)smallerFont: (id) sender
 {
     [[[[iTermController sharedInstance] currentTerminal] currentSession] changeFontSizeDirection:-1];
 }
 
+- (NSString *)formatBytes:(double)bytes
+{
+    if (bytes < 1) {
+        return [NSString stringWithFormat:@"%.04lf bytes", bytes];
+    } else if (bytes < 1024) {
+        return [NSString stringWithFormat:@"%d bytes", (int)bytes];
+    } else if (bytes < 10240) {
+        return [NSString stringWithFormat:@"%.1lf kB", bytes / 10];
+    } else if (bytes < 1048576) {
+        return [NSString stringWithFormat:@"%d kB", (int)bytes / 1024];
+    } else if (bytes < 10485760) {
+        return [NSString stringWithFormat:@"%.1lf MB", bytes / 1048576];
+    } else if (bytes < 1024.0 * 1024.0 * 1024.0) {
+        return [NSString stringWithFormat:@"%.0lf MB", bytes / 1048576];
+    } else if (bytes < 1024.0 * 1024.0 * 1024.0 * 10) {
+        return [NSString stringWithFormat:@"%.1lf GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+    } else {
+        return [NSString stringWithFormat:@"%.0lf GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+    }
+}
 
+- (void)changePasteSpeedBy:(double)factor
+                  bytesKey:(NSString *)bytesKey
+              defaultBytes:(int)defaultBytes
+                  delayKey:(NSString *)delayKey
+              defaultDelay:(float)defaultDelay
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    int bytes = [defaults integerForKey:bytesKey];
+    if (!bytes) {
+        bytes = defaultBytes;
+    }
+    float delay = [defaults floatForKey:delayKey];
+    if (!delay) {
+        delay = defaultDelay;
+    }
+    bytes *= factor;
+    delay /= factor;
+    bytes = MAX(1, MIN(1024 * 1024, bytes));
+    delay = MAX(0.001, MIN(10, delay));
+    [defaults setInteger:bytes forKey:bytesKey];
+    [defaults setFloat:delay forKey:delayKey];
+    double rate = bytes;
+    rate /= delay;
+    
+    [ToastWindowController showToastWithMessage:[NSString stringWithFormat:@"Pasting at up to %@/sec", [self formatBytes:rate]]];
+}
+
+- (IBAction)pasteFaster:(id)sender
+{
+    [self changePasteSpeedBy:1.5
+                    bytesKey:@"QuickPasteBytesPerCall"
+                defaultBytes:1024
+                    delayKey:@"QuickPasteDelayBetweenCalls"
+                defaultDelay:.01];
+}
+
+- (IBAction)pasteSlower:(id)sender
+{
+    [self changePasteSpeedBy:0.66
+                    bytesKey:@"QuickPasteBytesPerCall"
+                defaultBytes:1024
+                    delayKey:@"QuickPasteDelayBetweenCalls"
+                defaultDelay:.01];
+}
+
+- (IBAction)pasteSlowlyFaster:(id)sender
+{
+    [self changePasteSpeedBy:1.5
+                    bytesKey:@"SlowPasteBytesPerCall"
+                defaultBytes:16
+                    delayKey:@"SlowPasteDelayBetweenCalls"
+                defaultDelay:0.125];
+}
+
+- (IBAction)pasteSlowlySlower:(id)sender
+{
+    [self changePasteSpeedBy:0.66
+                    bytesKey:@"SlowPasteBytesPerCall"
+                defaultBytes:16
+                    delayKey:@"SlowPasteDelayBetweenCalls"
+                defaultDelay:0.125];
+}
 
 static void SwapDebugLog() {
         NSMutableString* temp;
@@ -1028,7 +1144,7 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
         struct timeval tv;
         gettimeofday(&tv, NULL);
 
-        [gDebugLogStr appendFormat:@"%ld.%08ld %s:%d (%s): ", (long long)tv.tv_sec, (long long)tv.tv_usec, file, line, function];
+        [gDebugLogStr appendFormat:@"%lld.%08lld %s:%d (%s): ", (long long)tv.tv_sec, (long long)tv.tv_usec, file, line, function];
         [gDebugLogStr appendString:value];
         [gDebugLogStr appendString:@"\n"];
         if ([gDebugLogStr length] > 100000000) {
@@ -1091,24 +1207,14 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
 - (IBAction)returnToDefaultSize:(id)sender
 {
     PseudoTerminal *frontTerminal = [[iTermController sharedInstance] currentTerminal];
-    PTYTab* theTab = [frontTerminal currentTab];
-    PTYSession* aSession = [theTab activeSession];
-
-    NSDictionary *abEntry = [aSession originalAddressBookEntry];
-
-    NSString* fontDesc = [abEntry objectForKey:KEY_NORMAL_FONT];
-    NSFont* font = [ITAddressBookMgr fontWithDesc:fontDesc];
-    NSFont* nafont = [ITAddressBookMgr fontWithDesc:[abEntry objectForKey:KEY_NON_ASCII_FONT]];
-    float hs = [[abEntry objectForKey:KEY_HORIZONTAL_SPACING] floatValue];
-    float vs = [[abEntry objectForKey:KEY_VERTICAL_SPACING] floatValue];
-    PTYSession* session = [frontTerminal currentSession];
-    PTYTextView* textview = [session TEXTVIEW];
-    [textview setFont:font nafont:nafont horizontalSpacing:hs verticalSpacing:vs];
-        if ([sender isAlternate]) {
-                [frontTerminal sessionInitiatedResize:session
-                                                                                width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
-                                                                           height:[[abEntry objectForKey:KEY_ROWS] intValue]];
-        }
+    PTYSession *session = [frontTerminal currentSession];
+	[session changeFontSizeDirection:0];
+    if ([sender isAlternate]) {
+        NSDictionary *abEntry = [session originalAddressBookEntry];
+        [frontTerminal sessionInitiatedResize:session
+                                        width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
+                                       height:[[abEntry objectForKey:KEY_ROWS] intValue]];
+    }
 }
 
 - (IBAction)exposeForTabs:(id)sender

@@ -34,6 +34,7 @@
 #import "LineBuffer.h"
 #import "PointerController.h"
 #import "PTYFontInfo.h"
+#import "CharacterRun.h"
 
 #include <sys/time.h>
 #define PRETTY_BOLD
@@ -42,8 +43,116 @@
 #define VMARGIN 20
 #define COLOR_KEY_SIZE 4
 
-@class VT100Screen;
+@class MovingAverage;
+@class PTYScrollView;
+@class PTYSession;
+@class PTYTask;
+@class SearchResult;
 @class ThreeFingerTapGestureRecognizer;
+@class VT100Screen;
+@class VT100Terminal;
+@protocol TrouterDelegate;
+
+@protocol PTYTextViewDelegate <NSObject>
+
+- (BOOL)xtermMouseReporting;
+- (BOOL)isPasting;
+- (void)queueKeyDown:(NSEvent *)event;
+- (void)keyDown:(NSEvent *)event;
+- (BOOL)hasActionableKeyMappingForEvent:(NSEvent *)event;
+- (int)optionKey;
+- (int)rightOptionKey;
+// Contextual menu
+- (void)menuForEvent:(NSEvent *)theEvent menu:(NSMenu *)theMenu;
+- (void)pasteString:(NSString *)aString;
+- (void)paste:(id)sender;
+- (void)textViewFontDidChange;
+- (PTYScrollView *)SCROLLVIEW;
+- (void)sendEscapeSequence:(NSString *)text;
+- (void)sendHexCode:(NSString *)codes;
+- (void)sendText:(NSString *)text;
+- (void)launchCoprocessWithCommand:(NSString *)command;
+- (void)insertText:(NSString *)string;
+
+@end
+
+@protocol PTYTextViewDataSource
+
+- (PTYSession *)session;
+- (VT100Terminal *)terminal;
+- (int)numberOfLines;
+- (int)width;
+- (int)height;
+
+// Cursor position is 1-based (the top left is at 1,1).
+- (int)cursorX;
+- (int)cursorY;
+
+// This function is dangerous! It writes to an internal buffer and returns a
+// pointer to it. Better to use getLineAtIndex:withBuffer:.
+- (screen_char_t *)getLineAtIndex:(int)theIndex;
+
+- (screen_char_t *)getLineAtScreenIndex:(int)theIndex;
+
+// Provide a buffer as large as sizeof(screen_char_t*) * ([SCREEN width] + 1)
+- (screen_char_t *)getLineAtIndex:(int)theIndex withBuffer:(screen_char_t*)buffer;
+- (int)numberOfScrollbackLines;
+- (int)scrollbackOverflow;
+- (void)resetScrollbackOverflow;
+- (long long)totalScrollbackOverflow;
+- (long long)absoluteLineNumberOfCursor;
+- (BOOL)continueFindAllResults:(NSMutableArray*)results
+                     inContext:(FindContext*)context;
+- (FindContext*)findContext;
+
+// Find all matches to to the search in the provided context. Returns YES if it
+// should be called again.
+- (void)cancelFindInContext:(FindContext*)context;
+
+// Initialize the find context.
+- (void)initFindString:(NSString*)aString
+      forwardDirection:(BOOL)direction
+          ignoringCase:(BOOL)ignoreCase
+                 regex:(BOOL)regex
+           startingAtX:(int)x
+           startingAtY:(int)y
+            withOffset:(int)offsetof
+             inContext:(FindContext*)context
+       multipleResults:(BOOL)multipleResults;
+
+- (BOOL)continueFindResultAtStartX:(int*)startX
+                          atStartY:(int*)startY
+                            atEndX:(int*)endX
+                            atEndY:(int*)endY
+                             found:(BOOL*)found
+                         inContext:(FindContext*)context;
+
+// Save the position of the current find context (with the screen appended).
+- (void)saveFindContextAbsPos;
+- (PTYTask *)shellTask;
+
+// Return a human-readable dump of the screen contents.
+- (NSString*)debugString;
+- (BOOL)isAllDirty;
+- (void)resetAllDirty;
+
+// Set the cursor dirty. Cursor coords are different because of how they handle
+// being in the WIDTH'th column (it wraps to the start of the next line)
+// whereas that wouldn't normally be a legal X value.
+- (void)setCharDirtyAtCursorX:(int)x Y:(int)y;
+
+// Check if any the character at x,y has been marked dirty.
+- (BOOL)isDirtyAtX:(int)x Y:(int)y;
+- (void)resetDirty;
+
+// Save the current state to a new frame in the dvr.
+- (void)saveToDvr;
+
+// If this returns true then the textview will broadcast iTermTabContentsChanged
+// when a dirty char is found.
+- (BOOL)shouldSendContentsChangedNotification;
+
+@end
 
 // Amount of time to highlight the cursor after beginFindCursor:YES
 static const double kFindCursorHoldTime = 1;
@@ -64,7 +173,9 @@ enum {
 
 @end
 
-@interface PTYTextView : NSView <NSTextInput, PointerControllerDelegate>
+@class CRunStorage;
+
+@interface PTYTextView : NSView <NSTextInput, PointerControllerDelegate, TrouterDelegate>
 {
     // This is a flag to let us know whether we are handling this
     // particular drag and drop operation. We are using it because
@@ -85,10 +196,13 @@ enum {
 
     // option to not render in bold
     BOOL useBoldFont;
-    
+
     // Option to draw bold text as brighter colors.
     BOOL useBrightBold;
-    
+
+    // option to not render in italic
+    BOOL useItalicFont;
+
     // NSTextInput support
     BOOL IM_INPUT_INSERT;
     NSRange IM_INPUT_SELRANGE;
@@ -116,16 +230,17 @@ enum {
     NSColor* defaultBoldColor;
     NSColor* defaultCursorColor;
     NSColor* selectionColor;
+    NSColor* unfocusedSelectionColor;
     NSColor* selectedTextColor;
     NSColor* cursorTextColor;
 
     // transparency
     double transparency;
-	double blend;
+    double blend;
 
     // data source
-    VT100Screen *dataSource;
-    id _delegate;
+    id<PTYTextViewDataSource> dataSource;
+    id<PTYTextViewDelegate> _delegate;
 
     // selection goes from startX,startY to endX,endY. The end may be before or after the start.
     // While the selection is being made (the mouse was clicked and is being dragged) the end
@@ -138,6 +253,7 @@ enum {
     char selectMode;
     BOOL mouseDownOnSelection;
     NSEvent *mouseDownEvent;
+    int lastReportedX_, lastReportedY_;
 
     //find support
     int lastFindStartX, lastFindEndX;
@@ -273,9 +389,9 @@ enum {
 
     // For accessibility. This is a giant string with the entire scrollback buffer plus screen concatenated with newlines for hard eol's.
     NSMutableString* allText_;
-    // For accessibility. This is the indices at which newlines occur in allText_, ignoring multi-char compositing characters.
+    // For accessibility. This is the indices at which soft newlines occur in allText_, ignoring multi-char compositing characters.
     NSMutableArray* lineBreakIndexOffsets_;
-    // For accessibility. This is the actual indices at which newlines occcur in allText_.
+    // For accessibility. This is the actual indices at which soft newlines occcur in allText_.
     NSMutableArray* lineBreakCharOffsets_;
 
     // Brightness of background color
@@ -323,6 +439,19 @@ enum {
 
 	// Experimental feature gated by ThreeFingerTapEmulatesThreeFingerClick bool pref.
     ThreeFingerTapGestureRecognizer *threeFingerTapGestureRecognizer_;
+
+    // Position of cursor last time we looked. Since the cursor might move around a lot between
+    // calls to -updateDirtyRects without making any changes, we only redraw the old and new cursor
+    // positions.
+    int prevCursorX, prevCursorY;
+
+    MovingAverage *drawRectDuration_, *drawRectInterval_;
+	// Current font. Only valid for the duration of a single drawing context.
+    NSFont *selectedFont_;
+
+    // Used by _drawCursorTo: to remember the last time the cursor moved to avoid drawing a blinked-out
+    // cursor while it's moving.
+    NSTimeInterval lastTimeCursorMoved_;
 }
 
 + (NSCursor *)textViewCursor;
@@ -346,6 +475,7 @@ enum {
 - (void)mouseDown:(NSEvent *)event;
 - (BOOL)mouseDownImpl:(NSEvent*)event;
 - (void)mouseUp:(NSEvent *)event;
+- (void)mouseMoved:(NSEvent *)event;
 - (void)mouseDragged:(NSEvent *)event;
 - (void)otherMouseDown: (NSEvent *) event;
 - (void)otherMouseUp:(NSEvent *)event;
@@ -424,6 +554,8 @@ enum {
 - (BOOL)useBoldFont;
 - (void)setUseBoldFont:(BOOL)boldFlag;
 - (void)setUseBrightBold:(BOOL)flag;
+- (BOOL)useItalicFont;
+- (void)setUseItalicFont:(BOOL)italicFlag;
 - (BOOL)blinkingCursor;
 - (void)setBlinkingCursor:(BOOL)bFlag;
 - (void)setBlinkAllowed:(BOOL)value;
@@ -434,7 +566,8 @@ enum {
 - (NSColor*)defaultFGColor;
 - (NSColor*)defaultBGColor;
 - (NSColor*)defaultBoldColor;
-- (NSColor*)colorForCode:(int)theIndex alternateSemantics:(BOOL)alt bold:(BOOL)isBold isBackground:(BOOL)isBackground;
+- (NSColor*)colorForCode:(int)theIndex green:(int)green blue:(int)blue colorMode:(ColorMode)theMode bold:(BOOL)isBold isBackground:(BOOL)isBackground;
+- (NSColor*)colorFromRed:(int)red green:(int)green blue:(int)blue;
 - (NSColor*)selectionColor;
 - (NSColor*)defaultCursorColor;
 - (NSColor*)selectedTextColor;
@@ -447,6 +580,9 @@ enum {
 - (void)setCursorColor:(NSColor*)color;
 - (void)setSelectedTextColor:(NSColor *)aColor;
 - (void)setCursorTextColor:(NSColor*)color;
+
+// Update the scroller color for light or dark backgrounds.
+- (void)updateScrollerForBackgroundColor;
 
 - (int)selectionStartX;
 - (int)selectionStartY;
@@ -461,8 +597,8 @@ enum {
 - (NSDictionary*)markedTextAttributes;
 - (void)setMarkedTextAttributes:(NSDictionary*)attr;
 
-- (id)dataSource;
-- (void)setDataSource:(id)aDataSource;
+- (id<PTYTextViewDataSource>)dataSource;
+- (void)setDataSource:(id<PTYTextViewDataSource>)aDataSource;
 - (id)delegate;
 - (void)setDelegate:(id)delegate;
 - (double)lineHeight;
@@ -595,6 +731,8 @@ enum {
 
 - (FindContext *)initialFindContext;
 
+- (NSString*)_allText;
+
 @end
 
 //
@@ -624,17 +762,30 @@ typedef enum {
 
 - (NSString *)_getURLForX:(int)x y:(int)y;
 // Returns true if any char in the line is blinking.
-- (BOOL)_drawLine:(int)line AtY:(double)curY toPoint:(NSPoint*)toPoint;
+- (BOOL)_drawLine:(int)line
+              AtY:(double)curY
+          toPoint:(NSPoint*)toPoint
+        charRange:(NSRange)charRange
+          context:(CGContextRef)ctx;
+
 - (void)_drawCursor;
 - (void)_drawCursorTo:(NSPoint*)toOrigin;
 - (void)_drawCharacter:(screen_char_t)screenChar
                fgColor:(int)fgColor
-    alternateSemantics:(BOOL)fgAlt
+               fgGreen:(int)fgGreen
+                fgBlue:(int)fgBlue
+           fgColorMode:(ColorMode)fgColorMode
                 fgBold:(BOOL)fgBold
                    AtX:(double)X
                      Y:(double)Y
            doubleWidth:(BOOL)double_width
-         overrideColor:(NSColor*)overrideColor;
+         overrideColor:(NSColor*)overrideColor
+               context:(CGContextRef)ctx;
+
+- (void)_drawRunsAt:(NSPoint)initialPoint
+                run:(CRun *)run
+            storage:(CRunStorage *)storage
+            context:(CGContextRef)ctx;
 
 - (BOOL)_isBlankLine:(int)y;
 - (void)_findUrlInString:(NSString *)aURLString andOpenInBackground:(BOOL)background;
@@ -659,8 +810,8 @@ typedef enum {
 - (void)_settingsChanged:(NSNotification *)notification;
 - (PTYFontInfo*)getFontForChar:(UniChar)ch
                      isComplex:(BOOL)complex
-                       fgColor:(int)fgColor
-                    renderBold:(BOOL*)renderBold;
+                    renderBold:(BOOL*)renderBold
+                  renderItalic:(BOOL)renderItalic;
 
 // Returns true if any onscreen text is blinking
 - (BOOL)updateDirtyRects;
@@ -683,7 +834,12 @@ typedef enum {
 // xStart, yStart: cell coordinates
 // width, height: cell width, height of screen
 // cursorHeight: cursor height in pixels
-- (BOOL)drawInputMethodEditorTextAt:(int)xStart y:(int)yStart width:(int)width height:(int)height cursorHeight:(double)cursorHeight;
+- (BOOL)drawInputMethodEditorTextAt:(int)xStart
+                                  y:(int)yStart
+                              width:(int)width
+                             height:(int)height
+                       cursorHeight:(double)cursorHeight
+                                ctx:(CGContextRef)ctx;
 
 - (BOOL)_wasAnyCharSelected;
 

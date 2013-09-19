@@ -46,8 +46,6 @@ static const int kMaxSelectedTextLinesForCustomActions = 100;
 #import "iTerm.h"
 #import "PTYTextView.h"
 #import "PseudoTerminal.h"
-#import "PTYSession.h"
-#import "VT100Screen.h"
 #import "PreferencePanel.h"
 #import "PTYScrollView.h"
 #import "PTYTask.h"
@@ -68,7 +66,11 @@ static const int kMaxSelectedTextLinesForCustomActions = 100;
 #import "PointerController.h"
 #import "PointerPrefsController.h"
 #import "CharacterRun.h"
+#import "CharacterRunInline.h"
 #import "ThreeFingerTapGestureRecognizer.h"
+#import "FutureMethods.h"
+#import "MovingAverage.h"
+#import "SearchResult.h"
 
 #include <sys/time.h>
 #include <math.h>
@@ -183,6 +185,10 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 @end
 
+@interface PTYTextView ()
+- (NSRect)cursorRect;
+@end
+
 
 @implementation PTYTextView
 
@@ -263,7 +269,6 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 - (id)initWithFrame:(NSRect)aRect
 {
     self = [super initWithFrame: aRect];
-    dataSource=_delegate=markedTextAttributes=NULL;
     firstMouseEventNumber_ = -1;
 
     dimmedColorCache_ = [[NSMutableDictionary alloc] init];
@@ -311,6 +316,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     resultMap_ = [[NSMutableDictionary alloc] init];
 
     trouter = [[Trouter alloc] init];
+    trouter.delegate = self;
     trouterDragged = NO;
     workingDirectoryAtLines = [[NSMutableArray alloc] init];
 
@@ -330,8 +336,21 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     } else {
         DLog(@"Not tracking touches in view %@", self);
     }
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"LogDrawingPerformance"]) {
+        NSLog(@"** Drawing performance timing enabled **");
+        drawRectDuration_ = [[MovingAverage alloc] init];
+        drawRectInterval_ = [[MovingAverage alloc] init];
+    }
 
     return self;
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<PTYTextView: %p frame=%@ visibleRect=%@ SCREEN=%@>",
+            self,
+            [NSValue valueWithRect:self.frame],
+            [NSValue valueWithRect:[self visibleRect]],
+            dataSource];
 }
 
 - (void)sendFakeThreeFingerClickDown:(BOOL)isDown basedOnEvent:(NSEvent *)event {
@@ -348,10 +367,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     if (isDown) {
         DLog(@"Emulate three finger click down");
         [self mouseDown:fakeEvent];
+        DLog(@"Returned from mouseDown");
     } else {
         DLog(@"Emulate three finger click up");
         [self mouseUp:fakeEvent];
+        DLog(@"Returned from mouseDown");
     }
+    DLog(@"Restore numTouches to saved value of %d", saved);
     numTouches_ = saved;
     CFRelease(fakeCgEvent);
 }
@@ -377,6 +399,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     DLog(@"%@ End touch. numTouches_ -> %d", self, numTouches_);
 }
 
+- (void)touchesCancelledWithEvent:(NSEvent *)event
+{
+    numTouches_ = 0;
+    [threeFingerTapGestureRecognizer_ touchesCancelledWithEvent:event];
+    DLog(@"%@ Cancel touch. numTouches_ -> %d", self, numTouches_);
+}
+
 - (BOOL)resignFirstResponder
 {
     return YES;
@@ -400,13 +429,23 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 - (void)viewDidMoveToWindow
 {
+    [self updateTrackingAreas];
+}
+
+- (void)updateTrackingAreas
+{
+    int trackingOptions;
+
     if ([self window]) {
+        trackingOptions = NSTrackingMouseEnteredAndExited | NSTrackingInVisibleRect | NSTrackingActiveAlways | NSTrackingEnabledDuringMouseDrag;
         if (trackingArea) {
             [self removeTrackingArea:trackingArea];
         }
-
+        if ([[dataSource terminal] mouseMode] == MOUSE_REPORTING_ALL_MOTION) {
+            trackingOptions |= NSTrackingMouseMoved;
+        }
         trackingArea = [[[NSTrackingArea alloc] initWithRect:[self visibleRect]
-                                                     options:NSTrackingMouseEnteredAndExited | NSTrackingInVisibleRect | NSTrackingActiveAlways | NSTrackingEnabledDuringMouseDrag
+                                                     options:trackingOptions
                                                        owner:self
                                                     userInfo:nil] autorelease];
         [self addTrackingArea:trackingArea];
@@ -415,6 +454,9 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 - (void)dealloc
 {
+    [drawRectDuration_ release];
+    [drawRectInterval_ release];
+
     [smartSelectionRules_ release];
     int i;
 
@@ -445,6 +487,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     [defaultBGColor release];
     [defaultBoldColor release];
     [selectionColor release];
+    [unfocusedSelectionColor release];
     [defaultCursorColor release];
 
     [primaryFont release];
@@ -501,6 +544,18 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     [self setNeedsDisplay:YES];
 }
 
+- (BOOL)useItalicFont
+{
+    return useItalicFont;
+}
+
+- (void)setUseItalicFont:(BOOL)italicFlag
+{
+    useItalicFont = italicFlag;
+    [self setNeedsDisplay:YES];
+}
+
+
 - (void)setUseBrightBold:(BOOL)flag
 {
     useBrightBold = flag;
@@ -523,18 +578,21 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     blinkAllowed_ = value;
 }
 
-- (void)markCursorAsDirty {
+- (void)setCursorNeedsDisplay {
+    int lineStart = [dataSource numberOfLines] - [dataSource height];
     int cursorX = [dataSource cursorX] - 1;
     int cursorY = [dataSource cursorY] - 1;
-    // Set a different bit for the cursor's dirty position because we don't
-    // want to save an instant replay from when only the cursor is dirty.
-    [dataSource setCharDirtyAtX:cursorX Y:cursorY value:2];
+    NSRect dirtyRect = NSMakeRect(MARGIN + cursorX * charWidth,
+                                  (lineStart + cursorY) * lineHeight,
+                                  charWidth,
+                                  lineHeight);
+    [self setNeedsDisplayInRect:dirtyRect];
 }
 
 - (void)setCursorType:(ITermCursorType)value
 {
     cursorType_ = value;
-    [self markCursorAsDirty];
+    [self setCursorNeedsDisplay];
     [self refresh];
 }
 
@@ -610,15 +668,20 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     [self setNeedsDisplay:YES];
 }
 
+- (void)updateScrollerForBackgroundColor
+{
+    PTYScroller *scroller = (PTYScroller*)[[[dataSource session] SCROLLVIEW] verticalScroller];
+    BOOL isDark = ([self perceivedBrightness:defaultBGColor] < kBackgroundConsideredDarkThreshold);
+    [scroller setHasDarkBackground:isDark];
+}
+
 - (void)setBGColor:(NSColor*)color
 {
     [defaultBGColor release];
     [color retain];
     defaultBGColor = color;
-    PTYScroller *scroller = (PTYScroller*)[[[dataSource session] SCROLLVIEW] verticalScroller];
-    BOOL isDark = ([self perceivedBrightness:color] < kBackgroundConsideredDarkThreshold);
     backgroundBrightness_ = PerceivedBrightness([color redComponent], [color greenComponent], [color blueComponent]);
-    [scroller setHasDarkBackground:isDark];
+    [self updateScrollerForBackgroundColor];
     [dimmedColorCache_ removeAllObjects];
     [cachedBackgroundColor_ release];
     cachedBackgroundColor_ = nil;
@@ -701,42 +764,63 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     [self setNeedsDisplay:YES];
 }
 
-- (NSColor*)_colorForCode:(int)theIndex alternateSemantics:(BOOL)alt bold:(BOOL)isBold
+- (NSColor*)_colorForCode:(int)theIndex
+                    green:(int)green
+                     blue:(int)blue
+                colorMode:(ColorMode)theMode
+                     bold:(BOOL)isBold
 {
     NSColor* color;
-
-    if (alt) {
-        switch (theIndex) {
-            case ALTSEM_SELECTED:
-                color = selectedTextColor;
-                break;
-            case ALTSEM_CURSOR:
-                color = cursorTextColor;
-                break;
-            case ALTSEM_BG_DEFAULT:
-                color = defaultBGColor;
-                break;
-            default:
-                if (isBold && useBrightBold) {
-                    if (theIndex == ALTSEM_BG_DEFAULT) {
-                        color = defaultBGColor;
-                    } else {
+    BOOL ok = NO;
+    switch (theMode) {
+        case ColorModeAlternate:
+            ok = YES;
+            switch (theIndex) {
+                case ALTSEM_SELECTED:
+                    color = selectedTextColor;
+                    break;
+                case ALTSEM_CURSOR:
+                    color = cursorTextColor;
+                    break;
+                case ALTSEM_BG_DEFAULT:
+                    color = defaultBGColor;
+                    break;
+                case ALTSEM_FG_DEFAULT:
+                    if (isBold && useBrightBold) {
                         color = [self defaultBoldColor];
+                    } else {
+                        color = defaultFGColor;
                     }
-                } else {
-                    color = defaultFGColor;
-                }
-        }
-    } else {
-        // Render bold text as bright. The spec (ECMA-48) describes the intense
-        // display setting (esc[1m) as "bold or bright". We make it a
-        // preference.
-        if (isBold &&
-            useBrightBold &&
-            (theIndex < 8)) { // Only colors 0-7 can be made "bright".
-            theIndex |= 8;  // set "bright" bit.
-        }
-        color = colorTable[theIndex];
+                    break;
+                default:
+                    // This should never happen, but if it does we should
+                    // get some bug reports by returning red.
+                    NSLog(@"Unexpected alternate-semantics color %d", theIndex);
+                    return [NSColor colorWithCalibratedRed:1 green:0 blue:0 alpha:1];
+            }
+            break;
+        case ColorMode24bit:
+            ok = YES;
+            color = [self colorFromRed:theIndex
+                                 green:green
+                                  blue:blue];
+            break;
+        case ColorModeNormal:
+            ok = YES;
+            // Render bold text as bright. The spec (ECMA-48) describes the intense
+            // display setting (esc[1m) as "bold or bright". We make it a
+            // preference.
+            if (isBold &&
+                useBrightBold &&
+                (theIndex < 8)) { // Only colors 0-7 can be made "bright".
+                theIndex |= 8;  // set "bright" bit.
+            }
+            color = colorTable[theIndex];
+            break;
+    }
+    NSAssert(ok, @"Bogus color mode %d", (int)theMode);
+    if (!ok) {
+        color = [NSColor redColor];
     }
 
     return color;
@@ -774,33 +858,50 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 // Provide a dimmed version of a color. It includes a caching optimization that
 // really helps when dimming is on.
 - (NSColor *)_dimmedColorForCode:(int)theIndex
-	      alternateSemantics:(BOOL)alt
-			    bold:(BOOL)isBold
-		      background:(BOOL)isBackground
+                           green:(int)green
+                            blue:(int)blue
+                       colorMode:(ColorMode)theMode
+                            bold:(BOOL)isBold
+                      background:(BOOL)isBackground
 {
     if (dimmingAmount_ == 0) {
         // No dimming: return plain-vanilla color.
         NSColor *theColor = [self _colorForCode:theIndex
-                             alternateSemantics:alt
+                                          green:green
+                                           blue:blue
+                                      colorMode:theMode
                                            bold:isBold];
         return theColor;
+    }
+
+    // 24-bit colors are not cached, as they could increase cache size
+    // nontrivially up to to 2^27
+    if (theMode == ColorMode24bit) {
+        NSColor *theColor = [self _colorForCode:theIndex
+                                          green:green
+                                           blue:blue
+                                      colorMode:theMode
+                                           bold:isBold];
+        return [self _dimmedColorFrom:theColor];
     }
 
     // Dimming is on. See if the dimmed version of the color is cached.
     // The max number of keys is 2^11 so this won't take too much memory.
     // This cache provides a 20%ish performance gain when dimming is on.
     int key = (((theIndex & 0xff) << 3) |
-               ((alt ? 1 : 0) << 2) |
+               ((theMode == ColorModeAlternate ? 1 : 0) << 2) |
                ((isBold ? 1 : 0) << 1) |
                ((isBackground ? 1 : 0) << 0));
     NSNumber *numKey = [NSNumber numberWithInt:key];
     NSColor *cacheEntry = [dimmedColorCache_ objectForKey:numKey];
-    if (cacheEntry ) {
+    if (cacheEntry) {
         return cacheEntry;
     } else {
-	NSColor *theColor = [self _colorForCode:theIndex
-			        alternateSemantics:alt
-					      bold:isBold];
+        NSColor *theColor = [self _colorForCode:theIndex
+                                          green:green
+                                           blue:blue
+                                      colorMode:theMode
+                                           bold:isBold];
         NSColor *dimmedColor = [self _dimmedColorFrom:theColor];
         [dimmedColorCache_ setObject:dimmedColor forKey:numKey];
         return dimmedColor;
@@ -808,21 +909,37 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 }
 
 - (NSColor*)colorForCode:(int)theIndex
-      alternateSemantics:(BOOL)alt
+                   green:(int)green
+                    blue:(int)blue
+               colorMode:(ColorMode)theMode
                     bold:(BOOL)isBold
             isBackground:(BOOL)isBackground
 {
     if (isBackground && dimOnlyText_) {
-	NSColor *theColor = [self _colorForCode:theIndex
-			     alternateSemantics:alt
-					   bold:isBold];
+        NSColor *theColor = [self _colorForCode:theIndex
+                                          green:green
+                                           blue:blue
+                                      colorMode:theMode
+                                           bold:isBold];
         return theColor;
     } else {
         return [self _dimmedColorForCode:theIndex
-                      alternateSemantics:alt
+                                   green:green
+                                    blue:blue
+                               colorMode:theMode
                                     bold:isBold
                               background:isBackground];
     }
+}
+
+- (NSColor *)colorFromRed:(int)red
+                    green:(int)green
+                     blue:(int)blue
+{
+    return [NSColor colorWithCalibratedRed:red/255.0
+                                     green:green/255.0
+                                      blue:blue/255.0
+                                     alpha:1];
 }
 
 - (NSColor *)selectionColor
@@ -830,11 +947,32 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     return selectionColor;
 }
 
+- (NSColor *)selectionColorForCurrentFocus
+{
+    PTYTextView* frontTextView = [[iTermController sharedInstance] frontTextView];
+    if (self == frontTextView) {
+        return selectionColor;
+    } else {
+        return unfocusedSelectionColor;
+    }
+}
+
 - (void)setSelectionColor:(NSColor *)aColor
 {
     [selectionColor release];
     [aColor retain];
     selectionColor = aColor;
+
+    [unfocusedSelectionColor autorelease];
+    CGFloat r,g,b;
+    r = [aColor redComponent];
+    g = [aColor greenComponent];
+    b = [aColor blueComponent];
+    unfocusedSelectionColor = [[NSColor colorWithCalibratedRed:(r + 1) / 3
+                                                         green:(g + 1) / 3
+                                                          blue:(b + 1) / 3
+                                                         alpha:1] retain];
+
     [dimmedColorCache_ removeAllObjects];
     [self setNeedsDisplay:YES];
 }
@@ -897,10 +1035,12 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     primaryFont.font = aFont;
     primaryFont.baselineOffset = baseline;
     primaryFont.boldVersion = [primaryFont computedBoldVersion];
+    primaryFont.italicVersion = [primaryFont computedItalicVersion];
 
     secondaryFont.font = naFont;
     secondaryFont.baselineOffset = baseline;
     secondaryFont.boldVersion = [secondaryFont computedBoldVersion];
+    secondaryFont.italicVersion = [secondaryFont computedItalicVersion];
 
     // Force the secondary font to use the same baseline as the primary font.
     secondaryFont.baselineOffset = primaryFont.baselineOffset;
@@ -909,6 +1049,13 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
             secondaryFont.boldVersion.baselineOffset = primaryFont.boldVersion.baselineOffset;
         } else {
             secondaryFont.boldVersion.baselineOffset = secondaryFont.baselineOffset;
+        }
+    }
+    if (secondaryFont.italicVersion) {
+        if (primaryFont.italicVersion) {
+            secondaryFont.italicVersion.baselineOffset = primaryFont.italicVersion.baselineOffset;
+        } else {
+            secondaryFont.italicVersion.baselineOffset = secondaryFont.baselineOffset;
         }
     }
 
@@ -1124,6 +1271,7 @@ NSMutableArray* screens=0;
 - (NSRange)_rangeOfLine:(NSUInteger)lineNumber
 {
     NSRange range;
+    [self _allText];  // Refresh lineBreakCharOffsets_
     if (lineNumber == 0) {
         range.location = 0;
     } else {
@@ -1213,7 +1361,9 @@ NSMutableArray* screens=0;
     NSUInteger lineNumber = [self _lineNumberOfIndex:theIndex];
     screen_char_t* theLine = [dataSource getLineAtIndex:lineNumber];
     NSUInteger startingIndexOfLine = [self _startingIndexOfLineNumber:lineNumber];
-    assert(theIndex >= startingIndexOfLine);
+    if (theIndex < startingIndexOfLine) {
+        return NSMakeRange(NSNotFound, 0);
+    }
     int x = theIndex - startingIndexOfLine;
     NSRange rangeOfLine = [self _rangeOfLine:lineNumber];
     NSRange range;
@@ -1282,10 +1432,17 @@ NSMutableArray* screens=0;
         return [allText_ substringWithRange:range];
     } else if ([attribute isEqualToString:NSAccessibilityRangeForPositionParameterizedAttribute]) {
         //(NSValue *)  - (rangeValue) composed char range; param:(NSValue * - pointValue)
-        NSPoint position = [(NSValue*)parameter pointValue];
-        int x = position.x / charWidth;
-        NSRect myFrame = [self frame];
-        int y = (myFrame.size.height - position.y) / lineHeight;
+        NSPoint screenPosition = [(NSValue*)parameter pointValue];
+        NSRect screenRect = NSMakeRect(screenPosition.x,
+                                       screenPosition.y,
+                                       0,
+                                       0);
+        NSRect windowRect = [self futureConvertRectFromScreen:screenRect];
+        NSPoint locationInTextView = [self convertPoint:windowRect.origin fromView:nil];
+        NSRect visibleRect = [[self enclosingScrollView] documentVisibleRect];
+        int x = (locationInTextView.x - MARGIN - visibleRect.origin.x) / charWidth;
+        int y = locationInTextView.y / lineHeight;
+
         if (y < 0) {
             return [NSValue valueWithRange:NSMakeRange(0, 0)];
         } else {
@@ -1311,12 +1468,12 @@ NSMutableArray* screens=0;
         int yMax = MAX(yStart, y2);
         int xMin = MIN(xStart, x2);
         int xMax = MAX(xStart, x2);
-        NSRect myFrame = [self frame];
-        myFrame.size.height = 0;
-        NSRect result = NSMakeRect(MAX(0, xMin * charWidth),
-                                   MAX(0, myFrame.size.height - yMin * lineHeight),
-                                   MAX(0, (xMax - xMin + 1) * charWidth),
+        NSRect result = NSMakeRect(MAX(0, floor(xMin * charWidth + MARGIN)),
+                                   MAX(0, yMin * lineHeight),
+                                   MAX(0, (xMax - xMin) * charWidth),
                                    MAX(0, (yMax - yMin + 1) * lineHeight));
+        result = [self convertRect:result toView:nil];
+        result = [self futureConvertRectToScreen:result];
         return [NSValue valueWithRect:result];
     } else if ([attribute isEqualToString:NSAccessibilityAttributedStringForRangeParameterizedAttribute]) {
         //(NSAttributedString *) - substring; param:(NSValue * - rangeValue)
@@ -1338,6 +1495,7 @@ NSMutableArray* screens=0;
     // NSLog(@"accessibilityAttributeValue:%@ forParameter:%@", attribute, parameter);
     id result = [self _accessibilityAttributeValue:attribute forParameter:parameter];
     // NSLog(@"  returns %@", result);
+    // NSLog(@"%@(%@) = %@", attribute, parameter, result);
     return result;
 }
 
@@ -1375,21 +1533,26 @@ NSMutableArray* screens=0;
                     chars[o++] = [cs characterAtIndex:l];
                 }
             } else {
-                chars[o++] = line[j].code;
+                if (line[j].code >= 0xf000) {
+                    // Don't output private range chars to accessibility.
+                    chars[o++] = 0;
+                } else {
+                    chars[o++] = line[j].code;
+                }
             }
         }
         // Append this line to allText_.
         offset += o;
-        if (k > 0) {
+        if (k >= 0) {
             [allText_ appendString:[NSString stringWithCharacters:chars length:o]];
         }
         if (line[width].code == EOL_HARD) {
             // Add a newline and update offsets arrays that track line break locations.
             [allText_ appendString:@"\n"];
             ++offset;
-            [lineBreakCharOffsets_ addObject:[NSNumber numberWithUnsignedLong:[allText_ length]]];
-            [lineBreakIndexOffsets_ addObject:[NSNumber numberWithUnsignedLong:offset]];
         }
+        [lineBreakCharOffsets_ addObject:[NSNumber numberWithUnsignedLong:[allText_ length]]];
+        [lineBreakIndexOffsets_ addObject:[NSNumber numberWithUnsignedLong:offset]];
     }
 
     return allText_;
@@ -1400,7 +1563,7 @@ NSMutableArray* screens=0;
     if ([attribute isEqualToString:NSAccessibilityRoleAttribute]) {
         return NSAccessibilityTextAreaRole;
     } else if ([attribute isEqualToString:NSAccessibilityRoleDescriptionAttribute]) {
-        return @"Terminal window";
+        return NSAccessibilityRoleDescriptionForUIElement(self);
     } else if ([attribute isEqualToString:NSAccessibilityHelpAttribute]) {
         return nil;
     } else if ([attribute isEqualToString:NSAccessibilityFocusedAttribute]) {
@@ -1416,16 +1579,16 @@ NSMutableArray* screens=0;
     } else if ([attribute isEqualToString:NSAccessibilitySelectedTextRangeAttribute]) {
         int x = [dataSource cursorX] - 1;
         int y = [dataSource numberOfLines] - [dataSource height] + [dataSource cursorY] - 1;
+        // quick fix for ZoomText for Mac - it does not query AXValue or other
+        // attributes that (re)generate allText_ and especially lineBreak{Char,Index}Offsets_
+        // which are needed for _rangeOfCharAtX:y:
+        [self _allText];
         NSRange range = [self _rangeOfCharAtX:x y:y];
         range.length--;
         return [NSValue valueWithRange:range];
     } else if ([attribute isEqualToString:NSAccessibilitySelectedTextRangesAttribute]) {
-        int x = [dataSource cursorX] - 1;
-        int y = [dataSource numberOfLines] - [dataSource height] + [dataSource cursorY] - 1;
-        NSRange range = [self _rangeOfCharAtX:x y:y];
-        range.length--;
         return [NSArray arrayWithObject:
-                [NSValue valueWithRange:range]];
+                [self _accessibilityAttributeValue:NSAccessibilitySelectedTextRangeAttribute]];
     } else if ([attribute isEqualToString:NSAccessibilityInsertionPointLineNumberAttribute]) {
         return [NSNumber numberWithInt:[dataSource cursorY]-1 + [dataSource numberOfScrollbackLines]];
     } else if ([attribute isEqualToString:NSAccessibilityVisibleCharacterRangeAttribute]) {
@@ -1439,6 +1602,7 @@ NSMutableArray* screens=0;
     // NSLog(@"accessibilityAttributeValue:%@", attribute);
     id result = [self _accessibilityAttributeValue:attribute];
     // NSLog(@"  returns %@", result);
+    // NSLog(@"%@ = %@", attribute, result);
     return result;
 }
 
@@ -1609,6 +1773,13 @@ NSMutableArray* screens=0;
         NSAccessibilityPostNotification(self, NSAccessibilitySelectedColumnsChangedNotification);
         accX = [dataSource cursorX];
         accY = absCursorY;
+        if (UAZoomEnabled()) {
+            CGRect viewRect = NSRectToCGRect([self futureConvertRectToScreen:[self convertRect:[self visibleRect] toView:nil]]);
+            CGRect selectedRect = NSRectToCGRect([self futureConvertRectToScreen:[self convertRect:[self cursorRect] toView:nil]]);
+            viewRect.origin.y = [[NSScreen mainScreen] frame].size.height - (viewRect.origin.y + viewRect.size.height);
+            selectedRect.origin.y = [[NSScreen mainScreen] frame].size.height - (selectedRect.origin.y + selectedRect.size.height);
+            UAZoomChangeFocus(&viewRect, &selectedRect, kUAZoomFocusTypeInsertionPoint);
+        }
     }
 
     return [self updateDirtyRects] || [self _isCursorBlinking];
@@ -1708,19 +1879,54 @@ NSMutableArray* screens=0;
     [(PTYScroller*)([[self enclosingScrollView] verticalScroller]) setUserScroll:YES];
 }
 
+- (void)markCursorDirty
+{
+  int currentCursorX = [dataSource cursorX] - 1;
+  int currentCursorY = [dataSource cursorY] - 1;
+  DLog(@"Mark cursor position %d,%d dirty", prevCursorX, prevCursorY);
+  [dataSource setCharDirtyAtCursorX:currentCursorX Y:currentCursorY];
+}
+
 - (void)hideCursor
 {
-    CURSOR=NO;
+    DLog(@"hideCursor");
+    [self markCursorDirty];
+    CURSOR = NO;
 }
 
 - (void)showCursor
 {
-    CURSOR=YES;
+    DLog(@"showCursor");
+    [self markCursorDirty];
+    CURSOR = YES;
 }
 
 - (void)drawRect:(NSRect)rect
 {
-    [self drawRect:rect to:nil];
+    DLog(@"drawRect:%@ in view %@", [NSValue valueWithRect:rect], self);
+    // If there are two or more rects that need display, the OS will pass in |rect| as the smallest
+    // bounding rect that contains them all. Luckily, we can get the list of the "real" dirty rects
+    // and they're guaranteed to be disjoint. So draw each of them individually.
+    const NSRect *rectArray;
+    NSInteger rectCount;
+    if (drawRectDuration_) {
+        [drawRectDuration_ startTimer];
+        NSTimeInterval interval = [drawRectInterval_ timeSinceTimerStarted];
+        if ([drawRectInterval_ haveStartedTimer]) {
+            [drawRectInterval_ addValue:interval];
+        }
+        [drawRectInterval_ startTimer];
+    }
+    [self getRectsBeingDrawn:&rectArray count:&rectCount];
+    for (int i = 0; i < rectCount; i++) {
+        DLog(@"drawRect - draw sub rectangle %@", [NSValue valueWithRect:rectArray[i]]);
+        [self drawRect:rectArray[i] to:nil];
+    }
+    if (drawRectDuration_) {
+        [drawRectDuration_ addValue:[drawRectDuration_ timeSinceTimerStarted]];
+        NSLog(@"%p Moving average time draw rect is %04f, time between calls to drawRect is %04f",
+              self, drawRectDuration_.value, drawRectInterval_.value);
+    }
     const NSRect frame = [self visibleRect];
     double x = frame.origin.x + frame.size.width;
     if ([[[[dataSource session] tab] realParentWindow] broadcastInputToSession:[dataSource session]]) {
@@ -1826,6 +2032,13 @@ NSMutableArray* screens=0;
 
 - (void)drawRect:(NSRect)rect to:(NSPoint*)toOrigin
 {
+    // The range of chars in the line that need to be drawn.
+    NSRange charRange = NSMakeRange(MAX(0, (rect.origin.x - MARGIN) / charWidth),
+                                    (rect.origin.x + rect.size.width - MARGIN) / charWidth);
+    charRange.length -= charRange.location;
+    if (charRange.location + charRange.length > [dataSource width]) {
+        charRange.length = [dataSource width] - charRange.location;
+    }
 #ifdef DEBUG_DRAWING
     static int iteration=0;
     static BOOL prevBad=NO;
@@ -1834,12 +2047,11 @@ NSMutableArray* screens=0;
         NSLog(@"Last was bad.");
         prevBad = NO;
     }
-    DebugLog([NSString stringWithFormat:@"%s(0x%x): rect=(%f,%f,%f,%f) frameRect=(%f,%f,%f,%f)]",
+    DebugLog([NSString stringWithFormat:@"%s(%p): rect=(%f,%f,%f,%f) frameRect=(%f,%f,%f,%f)]",
           __PRETTY_FUNCTION__, self,
           rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
           [self frame].origin.x, [self frame].origin.y, [self frame].size.width, [self frame].size.height]);
 #endif
-
     double curLineWidth = [dataSource width] * charWidth;
     if (lineHeight <= 0 || curLineWidth <= 0) {
         DebugLog(@"height or width too small");
@@ -1874,11 +2086,11 @@ NSMutableArray* screens=0;
 #ifdef DEBUG_DRAWING
     DebugLog([NSString stringWithFormat:@"drawRect: Draw lines in range [%d, %d)", lineStart, lineEnd]);
     // Draw each line
-    NSMutableDictionary* dct =
-    [NSDictionary dictionaryWithObjectsAndKeys:
-    [NSColor textBackgroundColor], NSBackgroundColorAttributeName,
-    [NSColor textColor], NSForegroundColorAttributeName,
-    [NSFont userFixedPitchFontOfSize: 0], NSFontAttributeName, NULL];
+    NSDictionary* dct =
+        [NSDictionary dictionaryWithObjectsAndKeys:
+            [NSColor textBackgroundColor], NSBackgroundColorAttributeName,
+            [NSColor textColor], NSForegroundColorAttributeName,
+            [NSFont userFixedPitchFontOfSize: 0], NSFontAttributeName, NULL];
 #endif
     int overflow = [dataSource scrollbackOverflow];
 #ifdef DEBUG_DRAWING
@@ -1887,6 +2099,9 @@ NSMutableArray* screens=0;
     double y = lineStart * lineHeight;
     const double initialY = y;
     BOOL anyBlinking = NO;
+
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
+
     for (int line = lineStart; line < lineEnd; line++) {
         NSRect lineRect = [self visibleRect];
         lineRect.origin.y = line*lineHeight;
@@ -1906,7 +2121,11 @@ NSMutableArray* screens=0;
                     const CGFloat offsetFromTopOfScreen = y - initialY;
                     temp = NSMakePoint(toOrigin->x, toOrigin->y + offsetFromTopOfScreen);
                 }
-                anyBlinking |= [self _drawLine:line-overflow AtY:y toPoint:toOrigin ? &temp : nil];
+                anyBlinking |= [self _drawLine:line-overflow
+                                           AtY:y
+                                       toPoint:toOrigin ? &temp : nil
+                                     charRange:charRange
+                                       context:ctx];
             }
 #ifdef DEBUG_DRAWING
             // if overflow > line then the requested line cannot be drawn
@@ -1930,12 +2149,12 @@ NSMutableArray* screens=0;
                 [lineDebug appendFormat:@"%@", ScreenCharToStr(&theLine[i])];
             }
             [lineDebug appendString:@"\n"];
-            [[NSString stringWithFormat:@"Iter %d, line %d, y=%d",
-              iteration, line, (int)(y)] drawInRect:NSMakeRect(rect.size.width-200,
-                                                               y,
-                                                               200,
-                                                               lineHeight)
-             withAttributes:dct];
+            [[NSString stringWithFormat:@"Iter %d, line %d, y=%d", iteration, line, (int)(y)]
+                 drawInRect:NSMakeRect(rect.size.width-200,
+                                       y,
+                                       200,
+                                       lineHeight)
+                 withAttributes:dct];
 #endif
         }
         y += lineHeight;
@@ -2024,7 +2243,8 @@ NSMutableArray* screens=0;
                                     y:[dataSource cursorY] - 1
                                 width:[dataSource width]
                                height:[dataSource height]
-                         cursorHeight:[self cursorHeight]];
+                         cursorHeight:[self cursorHeight]
+                                  ctx:ctx];
     [self _drawCursorTo:toOrigin];
     anyBlinking |= [self _isCursorBlinking];
 
@@ -2042,6 +2262,8 @@ NSMutableArray* screens=0;
         // blinking.
         [[dataSource session] scheduleUpdateIn:kBlinkTimerIntervalSec];
     }
+    [selectedFont_ release];
+    selectedFont_ = nil;
 }
 
 - (NSString*)_getTextInWindowAroundX:(int)x
@@ -2256,6 +2478,13 @@ NSMutableArray* screens=0;
 
 - (void)keyDown:(NSEvent*)event
 {
+    static BOOL isFirstInteraction = YES;
+    if (isFirstInteraction) {
+        iTermApplicationDelegate *appDelegate = (iTermApplicationDelegate *)[[NSApplication sharedApplication] delegate];
+        [appDelegate userDidInteractWithASession];
+        isFirstInteraction = NO;
+    }
+
     BOOL debugKeyDown = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DebugKeyDown"] boolValue];
 
     if (debugKeyDown) {
@@ -2263,6 +2492,10 @@ NSMutableArray* screens=0;
     }
     DebugLog(@"PTYTextView keyDown");
     id delegate = [self delegate];
+    if ([delegate isPasting]) {
+        [delegate queueKeyDown:event];
+        return;
+    }
     if ([[[[[self dataSource] session] tab] realParentWindow] inInstantReplay]) {
         if (debugKeyDown) {
             NSLog(@"PTYTextView keyDown: in instant replay, send to delegate");
@@ -2288,8 +2521,14 @@ NSMutableArray* screens=0;
         NSLog(@"modflag & rightAlt == rightAlt && rightOptionKey != NORMAL = %d", (int)((modflag & NSRightAlternateKeyMask) == NSRightAlternateKeyMask && [delegate rightOptionKey] != OPT_NORMAL));
         NSLog(@"isControl=%d", (int)(modflag & NSControlKeyMask));
         NSLog(@"keycode is slash=%d, is backslash=%d", (keyCode == 0x2c), (keyCode == 0x2a));
+        NSLog(@"event is repeated=%d", keyIsARepeat);
     }
 
+    // discard repeated key events if auto repeat mode (DECARM) is disabled
+    if (keyIsARepeat && ![[dataSource terminal] autorepeatMode]) {
+        return;
+    }
+    
     // Hide the cursor
     [NSCursor setHiddenUntilMouseMoves:YES];
 
@@ -2464,7 +2703,7 @@ NSMutableArray* screens=0;
             // convert NSEvent's "middle button" to X11's one
             buttonNumber = MOUSE_BUTTON_MIDDLE;
         }
-        
+
         switch ([terminal mouseMode]) {
             case MOUSE_REPORTING_NORMAL:
             case MOUSE_REPORTING_BUTTON_MOTION:
@@ -2679,6 +2918,7 @@ NSMutableArray* screens=0;
 
 - (void)scrollWheel:(NSEvent *)event
 {
+    DLog(@"scrollWheel:%@", event);
     NSPoint locationInWindow, locationInTextView;
     locationInWindow = [event locationInWindow];
     locationInTextView = [self convertPoint: locationInWindow fromView: nil];
@@ -2698,7 +2938,7 @@ NSMutableArray* screens=0;
         }
         VT100Terminal *terminal = [dataSource terminal];
         PTYSession* session = [dataSource session];
-        
+
         int buttonNumber;
         if ([event deltaY] > 0)
             buttonNumber = MOUSE_BUTTON_SCROLLDOWN;
@@ -2741,7 +2981,7 @@ NSMutableArray* screens=0;
 {
     MouseMode mouseMode = [[dataSource terminal] mouseMode];
 
-        BOOL changed = NO;
+    BOOL changed = NO;
     if (([event modifierFlags] & kDragPaneModifiers) == kDragPaneModifiers) {
                 changed = [self setCursor:[NSCursor openHandCursor]];
     } else if (([event modifierFlags] & (NSCommandKeyMask | NSAlternateKeyMask)) == (NSCommandKeyMask | NSAlternateKeyMask)) {
@@ -3018,6 +3258,8 @@ NSMutableArray* screens=0;
         if (ry < 0) {
             ry = -1;
         }
+        lastReportedX_ = rx;
+        lastReportedY_ = ry;
         VT100Terminal *terminal = [dataSource terminal];
         PTYSession* session = [dataSource session];
 
@@ -3041,8 +3283,11 @@ NSMutableArray* screens=0;
         }
     }
 
-    // Lock auto scrolling while the user is selecting text
-    [(PTYScroller*)([[self enclosingScrollView] verticalScroller]) setUserScroll:YES];
+    if ([event eventNumber] != firstMouseEventNumber_) {
+        // Lock auto scrolling while the user is selecting text, but not for a first-mouse event
+        // because drags are ignored for those.
+        [(PTYScroller*)([[self enclosingScrollView] verticalScroller]) setUserScroll:YES];
+    }
 
     if (mouseDownEvent != nil) {
         [mouseDownEvent release];
@@ -3238,6 +3483,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         if (ry < 0) {
             ry = -1;
         }
+        lastReportedX_ = rx;
+        lastReportedY_ = ry;
         VT100Terminal *terminal = [dataSource terminal];
         PTYSession* session = [dataSource session];
 
@@ -3288,8 +3535,23 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         DLog(@"is a click in the window");
 
         BOOL altPressed = ([event modifierFlags] & NSAlternateKeyMask) != 0;
-        if (altPressed && !cmdPressed && ![[self delegate] xtermMouseReporting]) {
-            [self placeCursorOnCurrentLineWithEvent:event];
+        if (altPressed && [[PreferencePanel sharedInstance] optionClickMovesCursor]) {
+            // This moves the cursor, but not if mouse reporting is on for button clicks.
+            VT100Terminal *terminal = [dataSource terminal];
+            switch ([terminal mouseMode]) {
+                case MOUSE_REPORTING_NORMAL:
+                case MOUSE_REPORTING_BUTTON_MOTION:
+                case MOUSE_REPORTING_ALL_MOTION:
+                    // Reporting mouse clicks. The remote app gets preference.
+                    break;
+
+                default:
+                    // Not reporting mouse clicks, so we'll move the cursor since the remote app can't.
+                    if (!cmdPressed) {
+                        [self placeCursorOnCurrentLineWithEvent:event];
+                    }
+                    break;
+            }
         }
 
         startX=-1;
@@ -3323,6 +3585,44 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [[[self dataSource] session] refreshAndStartTimerIfNeeded];
 }
 
+- (void)mouseMoved:(NSEvent *)event
+{
+    DLog(@"mouseMoved");
+    VT100Terminal *terminal = [dataSource terminal];
+    if (![self xtermMouseReporting]) {
+        DLog(@"Mouse move event is dispatched but xtermMouseReporting is not enabled");
+        return;
+    }
+#if DEBUG
+    assert([terminal mouseMode] == MOUSE_REPORTING_ALL_MOTION);
+#endif
+    if ([terminal mouseMode] != MOUSE_REPORTING_ALL_MOTION) {
+        DLog(@"Mouse move event is dispatched but mouseMode is not MOUSE_REPORTING_ALL_MOTION");
+        return;
+    }
+    NSPoint locationInWindow = [event locationInWindow];
+    NSPoint locationInTextView = [self convertPoint:locationInWindow fromView:nil];
+    int rx, ry;
+    NSRect visibleRect = [[self enclosingScrollView] documentVisibleRect];
+    rx = (locationInTextView.x - MARGIN - visibleRect.origin.x) / charWidth;
+    ry = (locationInTextView.y - visibleRect.origin.y) / lineHeight;
+    if (rx < 0) {
+        rx = -1;
+    }
+    if (ry < 0) {
+        ry = -1;
+    }
+    if (rx != lastReportedX_ || ry != lastReportedY_) {
+        lastReportedX_ = rx;
+        lastReportedY_ = ry;
+        PTYSession* session = [dataSource session];
+        [session writeTask:[terminal mouseMotion:MOUSE_BUTTON_NONE
+                                   withModifiers:[event modifierFlags]
+                                             atX:rx
+                                               Y:ry]];
+    }
+}
+
 - (void)mouseDragged:(NSEvent *)event
 {
     DLog(@"mouseDragged");
@@ -3336,6 +3636,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSPoint locationInTextView = [self convertPoint:locationInWindow fromView:nil];
     locationInTextView.x = ceil(locationInTextView.x);
     locationInTextView.y = ceil(locationInTextView.y);
+    // Clamp the y position to be within the view. Sometimes we get events we probably shouldn't.
+    locationInTextView.y = MIN(self.frame.size.height - 1,
+                               MAX(0, locationInTextView.y));
     NSRect  rectInTextView = [self visibleRect];
     int x, y;
     int width = [dataSource width];
@@ -3382,25 +3685,29 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         if (ry < 0) {
             ry = -1;
         }
-        VT100Terminal *terminal = [dataSource terminal];
-        PTYSession* session = [dataSource session];
+        if (rx != lastReportedX_ || ry != lastReportedY_) {
+            lastReportedX_ = rx;
+            lastReportedY_ = ry;
+            VT100Terminal *terminal = [dataSource terminal];
+            PTYSession* session = [dataSource session];
 
-        switch ([terminal mouseMode]) {
-            case MOUSE_REPORTING_BUTTON_MOTION:
-            case MOUSE_REPORTING_ALL_MOTION:
-                [session writeTask:[terminal mouseMotion:MOUSE_BUTTON_LEFT
-                                           withModifiers:[event modifierFlags]
-                                                     atX:rx
-                                                       Y:ry]];
-            case MOUSE_REPORTING_NORMAL:
-                DebugLog([NSString stringWithFormat:@"Mouse drag. startx=%d starty=%d, endx=%d, endy=%d", startX, startY, endX, endY]);
-                return;
-                break;
+            switch ([terminal mouseMode]) {
+                case MOUSE_REPORTING_BUTTON_MOTION:
+                case MOUSE_REPORTING_ALL_MOTION:
+                    [session writeTask:[terminal mouseMotion:MOUSE_BUTTON_LEFT
+                                               withModifiers:[event modifierFlags]
+                                                         atX:rx
+                                                           Y:ry]];
+                case MOUSE_REPORTING_NORMAL:
+                    DebugLog([NSString stringWithFormat:@"Mouse drag. startx=%d starty=%d, endx=%d, endy=%d", startX, startY, endX, endY]);
+                    return;
+                    break;
 
-            case MOUSE_REPORTING_NONE:
-            case MOUSE_REPORTING_HILITE:
-                // fall through
-                break;
+                case MOUSE_REPORTING_NONE:
+                case MOUSE_REPORTING_HILITE:
+                    // fall through
+                    break;
+            }
         }
     }
 
@@ -3588,7 +3895,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSPoint clickPoint = [self clickPoint:event];
     int x = clickPoint.x;
     int y = clickPoint.y;
-    
+
     [self smartSelectAtX:x y:y ignoringNewlines:ignoringNewlines];
     [self setSelectionTime];
     if (startX > -1 && _delegate) {
@@ -3860,8 +4167,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         includeLastNewline:(BOOL)includeLastNewline
     trimTrailingWhitespace:(BOOL)trimSelectionTrailingSpaces
 {
+    DLog(@"Find selected text from %d,%d to %d,%d pad=%d, includeLastNewline=%d, trim=%d",
+         startx, starty, nonInclusiveEndx, endy, (int)pad, (int)includeLastNewline,
+         (int)trimSelectionTrailingSpaces);
     int endx = nonInclusiveEndx-1;
     int width = [dataSource width];
+    assert(endx <= width);
     const int estimatedSize = (endy - starty + 1) * (width + 1) + (endx - startx + 1);
     NSMutableString* result = [NSMutableString stringWithCapacity:estimatedSize];
     int y, x1, x2;
@@ -3907,7 +4218,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                         }
                         break;
                     } else {
-                        [result appendString:@" "]; // represent end-of-line blank with space
+                        [result appendString:@" "]; // replace mid-line null char with space
                     }
                 } else if (x1 == x2 &&
                            y < endy &&
@@ -3959,15 +4270,18 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (NSString *)selectedTextWithPad:(BOOL)pad
 {
     if (startX <= -1) {
+        DLog(@"startx < 0 so there is no selected text");
         return nil;
     }
     if (selectMode == SELECT_BOX) {
+        DLog(@"find selected text in box");
         return [self contentInBoxFromX:startX
                                      Y:startY
                                    ToX:endX
                                      Y:endY
                                    pad:pad];
     } else {
+        DLog(@"find selected text in normal region");
         return ([self contentFromX:startX
                                  Y:startY
                                ToX:endX
@@ -4037,8 +4351,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSPasteboard *pboard = [NSPasteboard generalPasteboard];
     NSString *copyString;
 
+    DLog(@"-[PTYTextView copy:] called");
     copyString = [self selectedText];
-
+    DLog(@"Have selected text of length %d. startX=%d, startY=%d, endX=%d, endY=%d", (int)[copyString length], startX, startY, endX, endY);
     if (copyString) {
         [pboard declareTypes:[NSArray arrayWithObject:NSStringPboardType] owner:self];
         [pboard setString:copyString forType:NSStringPboardType];
@@ -4365,7 +4680,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Ask the delegae if there is anything to be added
-    if ([[self delegate] respondsToSelector:@selector(menuForEvent: menu:)]) {
+    if ([[self delegate] respondsToSelector:@selector(menuForEvent:menu:)]) {
         [[self delegate] menuForEvent:theEvent menu:theMenu];
     }
 
@@ -4526,7 +4841,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 aString = [pb stringForType:NSStringPboardType];
                 if (aString != nil) {
                     if ([delegate respondsToSelector:@selector(pasteString:)]) {
-                        [delegate pasteString: aString];
+                        [delegate pasteString:aString];
                         res = YES;
                     }
                 }
@@ -4687,8 +5002,10 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         IM_INPUT_INSERT = YES;
     }
 
-    // In case imeOffset changed, the frame height must adjust.
-    [[[self dataSource] session] refreshAndStartTimerIfNeeded];
+    if ([self hasMarkedText]) {
+        // In case imeOffset changed, the frame height must adjust.
+        [[[self dataSource] session] refreshAndStartTimerIfNeeded];
+    }
 }
 
 - (BOOL)acceptsFirstMouse:(NSEvent *)theEvent
@@ -5478,7 +5795,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (void)drawFlippedBackground:(NSRect)bgRect toPoint:(NSPoint)dest
 {
     PTYScrollView* scrollView = (PTYScrollView*)[self enclosingScrollView];
-    BOOL hasBGImage = [scrollView backgroundImage] != nil;
+    BOOL hasBGImage = [scrollView hasBackgroundImage];
     double alpha = 1.0 - transparency;
     if (hasBGImage) {
         [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
@@ -5486,10 +5803,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                                              useTransparency:[self useTransparency]];
                 // Blend default bg color
         NSColor *aColor = [self colorForCode:ALTSEM_BG_DEFAULT
-                              alternateSemantics:YES
-					    bold:NO
-				    isBackground:YES];
-	[[aColor colorWithAlphaComponent:1 - blend] set];
+                                       green:0
+                                        blue:0
+                                   colorMode:ColorModeAlternate
+                                        bold:NO
+                                isBackground:YES];
+        [[aColor colorWithAlphaComponent:1 - blend] set];
         NSRectFillUsingOperation(NSMakeRect(dest.x + bgRect.origin.x,
                                             dest.y + bgRect.origin.y,
                                             bgRect.size.width,
@@ -5513,17 +5832,19 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (void)drawBackground:(NSRect)bgRect toPoint:(NSPoint)dest
 {
     PTYScrollView* scrollView = (PTYScrollView*)[self enclosingScrollView];
-    BOOL hasBGImage = [scrollView backgroundImage] != nil;
+    BOOL hasBGImage = [scrollView hasBackgroundImage];
     double alpha = 1.0 - transparency;
     if (hasBGImage) {
         [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
                                                                      toPoint:dest
                                                              useTransparency:[self useTransparency]];
-	// Blend default bg color over bg image.
+        // Blend default bg color over bg image.
         NSColor *aColor = [self colorForCode:ALTSEM_BG_DEFAULT
-                              alternateSemantics:YES
-					    bold:NO
-				    isBackground:YES];
+                                       green:0
+                                        blue:0
+                                   colorMode:ColorModeAlternate
+                                        bold:NO
+                                isBackground:YES];
         [[aColor colorWithAlphaComponent:1 - blend] set];
         NSRectFillUsingOperation(NSMakeRect(dest.x + bgRect.origin.x,
                                             dest.y + bgRect.origin.y,
@@ -5547,18 +5868,20 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (void)drawBackground:(NSRect)bgRect
 {
     PTYScrollView* scrollView = (PTYScrollView*)[self enclosingScrollView];
-    BOOL hasBGImage = [scrollView backgroundImage] != nil;
+    BOOL hasBGImage = [scrollView hasBackgroundImage];
     double alpha = 1.0 - transparency;
     if (hasBGImage) {
         [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
                                                              useTransparency:[self useTransparency]];
                 // Blend default bg color over bg iamge.
         NSColor *aColor = [self colorForCode:ALTSEM_BG_DEFAULT
-                          alternateSemantics:YES
+                                       green:0
+                                        blue:0
+                                   colorMode:ColorModeAlternate
                                         bold:NO
                                 isBackground:YES];
-	[[aColor colorWithAlphaComponent:1 - blend] set];
-	NSRectFillUsingOperation(bgRect, NSCompositeSourceOver);
+        [[aColor colorWithAlphaComponent:1 - blend] set];
+        NSRectFillUsingOperation(bgRect, NSCompositeSourceOver);
     } else {
         // Either draw a normal bg or, if transparency is off, blend the default bg color over the bg image.
         if (![self useTransparency]) {
@@ -5743,27 +6066,24 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return PerceivedBrightness([c redComponent], [c greenComponent], [c blueComponent]);
 }
 
-@end
+#pragma mark - Trouter Delegate
 
-//
-// private methods
-//
-@implementation PTYTextView (Private)
+- (void)trouterLaunchCoprocessWithCommand:(NSString *)command {
+    [_delegate launchCoprocessWithCommand:command];
+}
+
+#pragma mark - Private methods
 
 - (PTYFontInfo*)getFontForChar:(UniChar)ch
                      isComplex:(BOOL)complex
-                       fgColor:(int)fgColor
                     renderBold:(BOOL*)renderBold
+                  renderItalic:(BOOL)renderItalic
 {
     BOOL isBold = *renderBold && useBoldFont;
+    BOOL isItalic = renderItalic && useItalicFont;
     *renderBold = NO;
     PTYFontInfo* theFont;
     BOOL usePrimary = !complex && (ch < 128);
-    if (!usePrimary && !complex) {
-        // Try to use the primary font for non-ascii characters, but only
-        // if it has the glyph.
-        usePrimary = [primaryFont hasGlyphForCharacter:ch];
-    }
 
     if (usePrimary) {
         if (isBold) {
@@ -5771,6 +6091,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             if (!theFont) {
                 theFont = primaryFont;
                 *renderBold = YES;
+            }
+        } else if (isItalic) {
+            theFont = primaryFont.italicVersion;
+            if (!theFont) {
+                theFont = primaryFont;
             }
         } else {
             theFont = primaryFont;
@@ -5781,6 +6106,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             if (!theFont) {
                 theFont = secondaryFont;
                 *renderBold = YES;
+            }
+        } else if (isItalic) {
+            theFont = secondaryFont.italicVersion;
+            if (!theFont) {
+                theFont = secondaryFont;
             }
         } else {
             theFont = secondaryFont;
@@ -5984,38 +6314,40 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return memoizedContrastingColor_;
 }
 
-- (void)_constructRuns:(NSPoint)initialPoint
-               theLine:(screen_char_t *)theLine
-            sharedData:(SharedCharacterRunData *)sharedData
-                  runs:(NSMutableArray *)runs
-              reversed:(BOOL)reversed
-            bgselected:(BOOL)bgselected
-                 width:(const int)width
-            indexRange:(NSRange)indexRange
-               bgColor:(NSColor*)bgColor
-               matches:(NSData*)matches
+- (CRun *)_constructRuns:(NSPoint)initialPoint
+                 theLine:(screen_char_t *)theLine
+                reversed:(BOOL)reversed
+              bgselected:(BOOL)bgselected
+                   width:(const int)width
+              indexRange:(NSRange)indexRange
+                 bgColor:(NSColor*)bgColor
+                 matches:(NSData*)matches
+                 storage:(CRunStorage *)storage
 {
-    CharacterRun* currentRun = NULL;
+    CRun *firstRun = NULL;
+    CAttrs attrs;
+    CRun *currentRun = NULL;
     const char* matchBytes = [matches bytes];
-
-    CharacterRun *prevChar = [[[CharacterRun alloc] init] autorelease];
-    BOOL havePrevChar = NO;
-    CGFloat curX = initialPoint.x;
-
+    int lastForegroundColor = -1;
+    int lastFgGreen = -1;
+    int lastFgBlue = -1;
+    int lastForegroundColorMode = -1;
+    int lastBold = 2;  // Bold is a one-bit field so it can never equal 2.
+    NSColor *lastColor = nil;
+    CGFloat curX = 0;
     for (int i = indexRange.location; i < indexRange.location + indexRange.length; i++) {
         if (theLine[i].code == DWC_RIGHT) {
             continue;
         }
         BOOL doubleWidth = i < width - 1 && (theLine[i + 1].code == DWC_RIGHT);
-        CharacterRun *thisChar = [[[CharacterRun alloc] init] autorelease];
         unichar thisCharUnichar = 0;
         NSString* thisCharString = nil;
         CGFloat thisCharAdvance;
 
         if (theLine[i].code < 128 && !theLine[i].complexChar) {
-            thisChar.antiAlias = asciiAntiAlias;
+            attrs.antiAlias = asciiAntiAlias;
         } else {
-            thisChar.antiAlias = nonasciiAntiAlias;
+            attrs.antiAlias = nonasciiAntiAlias;
         }
         BOOL isSelection = NO;
 
@@ -6023,26 +6355,44 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         if (bgselected) {
             // Is a selection.
             isSelection = YES;
-	    // NOTE: This could be optimized by caching the color.
-            thisChar.color = [self _dimmedColorFrom:selectedTextColor];
+            // NOTE: This could be optimized by caching the color.
+            attrs.color = [self _dimmedColorFrom:selectedTextColor];
         } else {
             // Not a selection.
             if (reversed &&
-                theLine[i].alternateForegroundSemantics &&
-                theLine[i].foregroundColor == ALTSEM_FG_DEFAULT) {
+                theLine[i].foregroundColor == ALTSEM_FG_DEFAULT &&
+                theLine[i].foregroundColorMode == ColorModeAlternate) {
                 // Has default foreground color so use background color.
                 if (!dimOnlyText_) {
-                    thisChar.color = [self _dimmedColorFrom:defaultBGColor];
+                    attrs.color = [self _dimmedColorFrom:defaultBGColor];
                 } else {
-                    thisChar.color = defaultBGColor;
+                    attrs.color = defaultBGColor;
                 }
             } else {
-                // Not reversed or not subject to reversing (only default
-                // foreground color is drawn in reverse video).
-                thisChar.color = [self colorForCode:theLine[i].foregroundColor
-                                 alternateSemantics:theLine[i].alternateForegroundSemantics
-                                               bold:theLine[i].bold
-                                       isBackground:NO];
+                if (theLine[i].foregroundColor == lastForegroundColor &&
+                    theLine[i].fgGreen == lastFgGreen &&
+                    theLine[i].fgBlue == lastFgBlue &&
+                    theLine[i].foregroundColorMode == lastForegroundColorMode &&
+                    theLine[i].bold == lastBold) {
+                    // Looking up colors with -colorForCode:... is expensive and it's common to
+                    // have consecutive characters with the same color.
+                    attrs.color = lastColor;
+                } else {
+                    // Not reversed or not subject to reversing (only default
+                    // foreground color is drawn in reverse video).
+                    lastForegroundColor = theLine[i].foregroundColor;
+                    lastFgGreen = theLine[i].fgGreen;
+                    lastFgBlue = theLine[i].fgBlue;
+                    lastForegroundColorMode = theLine[i].foregroundColorMode;
+                    lastBold = theLine[i].bold;
+                    attrs.color = [self colorForCode:lastForegroundColor
+                                               green:lastFgGreen
+                                                blue:lastFgBlue
+                                           colorMode:lastForegroundColorMode
+                                                bold:lastBold
+                                        isBackground:NO];
+                    lastColor = attrs.color;
+                }
             }
         }
 
@@ -6051,12 +6401,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             int theIndex = i / 8;
             int mask = 1 << (i & 7);
             if (theIndex < [matches length] && matchBytes[theIndex] & mask) {
-                thisChar.color = [NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:1];
+                attrs.color = [NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:1];
             }
         }
 
         if (minimumContrast_ > 0.001 && bgColor) {
-            thisChar.color = [self color:thisChar.color withContrastAgainst:bgColor];
+            // TODO: Way too much time spent here. Use previous char's color if it is the same.
+            attrs.color = [self color:attrs.color withContrastAgainst:bgColor];
         }
         BOOL drawable;
         if (blinkShow || ![self _charBlinks:theLine[i]]) {
@@ -6065,13 +6416,19 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
             // Set the character type and its unichar/string.
             if (theLine[i].complexChar) {
-                thisChar.runType = kCharacterRunSingleCharWithCombiningMarks;
                 thisCharString = ComplexCharToStr(theLine[i].code);
-                drawable = YES;  // TODO: not all unicode is drawable
+                if (!thisCharString) {
+                    // A bug that's happened more than once is that code gets
+                    // set to 0 but complexChar is left set to true.
+                    NSLog(@"No complex char for code %d", (int)theLine[i].code);
+                    thisCharString = @"";
+                    drawable = NO;
+                } else {
+                    drawable = YES;  // TODO: not all unicode is drawable
+                }
             } else {
+                thisCharString = nil;
                 // Non-complex char
-                thisChar.runType = kCharacterRunMultipleSimpleChars;
-
                 // TODO: There are other spaces in unicode that should be supported.
                 drawable = (theLine[i].code != 0 &&
                             theLine[i].code != '\t' &&
@@ -6084,10 +6441,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             }
         } else {
             // Chatacter hidden because of blinking.
-            thisChar.runType = kCharacterRunMultipleSimpleChars;
             drawable = NO;
         }
-
+        if (theLine[i].underline) {
+            // This is not as fast as possible, but is nice and simple. Always draw underlined text
+            // even if it's just a blank.
+            drawable = YES;
+        }
         // Set all other common attributes.
         if (doubleWidth) {
             thisCharAdvance = charWidth * 2;
@@ -6097,91 +6457,106 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
         if (drawable) {
             BOOL fakeBold = theLine[i].bold;
-            thisChar.fontInfo = [self getFontForChar:theLine[i].code
-                                           isComplex:theLine[i].complexChar
-                                             fgColor:theLine[i].foregroundColor
-                                          renderBold:&fakeBold];
-            thisChar.fakeBold = fakeBold;
-
-            // Create a new run if needed (this char differs from the previous
-            // or is the first in this line or comes after a nondrawable.
-            // NOTE: The test for thisChar->color == prevChar->color is a gross hack
-            // but I think it's safe. Obviously, == is a wrong way to compare
-            // colors. Because colors are never dealloced within this loop,
-            // pointer equality implies color equality (but color equality does NOT
-            // imply pointer equality). This is fragile but fast and any false
-            // negatives have a minor performance hit.
-            BOOL beginNewRun = NO;
-            if (!havePrevChar || ![thisChar isCompatibleWith:prevChar]) {
-                beginNewRun = YES;
-                havePrevChar = YES;
+            attrs.fontInfo = [self getFontForChar:theLine[i].code
+                                        isComplex:theLine[i].complexChar
+                                       renderBold:&fakeBold
+                                     renderItalic:theLine[i].italic];
+            attrs.fakeBold = fakeBold;
+            attrs.underline = theLine[i].underline;
+            if (!currentRun) {
+                firstRun = currentRun = malloc(sizeof(CRun));
+                CRunInitialize(currentRun, &attrs, storage, curX);
             }
-            if (beginNewRun) {
-                if (currentRun) {
-                    [runs addObjectsFromArray:[currentRun runsWithGlyphs]];
-                }
-                // Begin a new run.
-                currentRun = [[thisChar copy] autorelease];
-                [currentRun clearRange];
-                currentRun.sharedData = sharedData;
-                currentRun.x = curX;
-            }
-
-            if (thisChar.runType == kCharacterRunMultipleSimpleChars) {
-                [currentRun appendCode:thisCharUnichar withAdvance:thisCharAdvance];
+            if (thisCharString) {
+                currentRun = CRunAppendString(currentRun, &attrs, thisCharString, thisCharAdvance, curX);
             } else {
-                [currentRun appendCodesFromString:thisCharString withAdvance:thisCharAdvance];
+                currentRun = CRunAppend(currentRun, &attrs, thisCharUnichar, thisCharAdvance, curX);
             }
         } else {
-            havePrevChar = NO;
+            if (currentRun) {
+                CRunTerminate(currentRun);
+            }
+            attrs.fakeBold = NO;
+            attrs.fontInfo = nil;
         }
 
-        // draw underline
-        // TODO(georgen): Move this to the drawing functions!
-        if (theLine[i].underline && drawable) {
-            [thisChar.color set];
-            NSRectFill(NSMakeRect(curX,
-                                  initialPoint.y + lineHeight - 2,
-                                  doubleWidth ? charWidth * 2 : charWidth,
-                                  1));
-        }
         curX += thisCharAdvance;
-        prevChar.runType = thisChar.runType;
-        prevChar.fontInfo = thisChar.fontInfo;
-        prevChar.color = thisChar.color;
-        prevChar.fakeBold = thisChar.fakeBold;
-        prevChar.antiAlias = thisChar.antiAlias;
     }
+    return firstRun;
+}
 
-    if (currentRun) {
-        [runs addObjectsFromArray:[currentRun runsWithGlyphs]];
+- (void)selectFont:(NSFont *)font inContext:(CGContextRef)ctx
+{
+    if (font != selectedFont_) {
+        // This method is really slow so avoid doing it when it's not necessary
+        CGContextSelectFont(ctx,
+                            [[font fontName] UTF8String],
+                            [font pointSize],
+                            kCGEncodingMacRoman);
+        [selectedFont_ release];
+        selectedFont_ = [font retain];
     }
 }
 
-- (void)_advancedDrawChar:(unichar*)codes
-                 numCodes:(int)numCodes
-                 fontInfo:(PTYFontInfo*)fontInfo
-                    color:(NSColor*)color
-                       at:(NSPoint)pos
-                    width:(CGFloat)width
-                 fakeBold:(BOOL)fakeBold
-                antiAlias:(BOOL)antiAlias
+// Note: caller must nil out selectedFont_ after the graphics context becomes invalid.
+- (int)_drawSimpleRun:(CRun *)currentRun
+                  ctx:(CGContextRef)ctx
+         initialPoint:(NSPoint)initialPoint
 {
-    NSString* str = [NSString stringWithCharacters:codes
-                                            length:numCodes];
-    NSDictionary* attrs;
-    if (advancedFontRendering && antiAlias) {
-        attrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                               fontInfo.font, NSFontAttributeName,
-                               color, NSForegroundColorAttributeName,
-                               [NSNumber numberWithFloat:strokeThickness], NSStrokeWidthAttributeName,
-                               nil];
-    } else {
-        attrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                 fontInfo.font, NSFontAttributeName,
-                 color, NSForegroundColorAttributeName,
-                 nil];
+    int firstMissingGlyph;
+    CGGlyph *glyphs = CRunGetGlyphs(currentRun, &firstMissingGlyph);
+    if (!glyphs) {
+        return -1;
     }
+
+    size_t numCodes = currentRun->length;
+    size_t length = numCodes;
+    if (firstMissingGlyph >= 0) {
+        length = firstMissingGlyph;
+    }
+    [self selectFont:currentRun->attrs.fontInfo.font inContext:ctx];
+    CGContextSetFillColorSpace(ctx, [[currentRun->attrs.color colorSpace] CGColorSpace]);
+    int componentCount = [currentRun->attrs.color numberOfComponents];
+
+    CGFloat components[componentCount];
+    [currentRun->attrs.color getComponents:components];
+    CGContextSetFillColor(ctx, components);
+
+    double y = initialPoint.y + lineHeight + currentRun->attrs.fontInfo.baselineOffset;
+    int x = initialPoint.x + currentRun->x;
+    // Flip vertically and translate to (x, y).
+    CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
+                                                      0.0, -1.0,
+                                                      x,    y));
+
+    void *advances = CRunGetAdvances(currentRun);
+    CGContextShowGlyphsWithAdvances(ctx, glyphs, advances, length);
+
+    if (currentRun->attrs.fakeBold) {
+        // If anti-aliased, drawing twice at the same position makes the strokes thicker.
+        // If not anti-alised, draw one pixel to the right.
+        CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
+                                                          0.0, -1.0,
+                                                          x + (currentRun->attrs.antiAlias ? 0 : 1),
+                                                          y));
+
+        CGContextShowGlyphsWithAdvances(ctx, glyphs, advances, length);
+    }
+    return firstMissingGlyph;
+}
+
+- (void)_advancedDrawString:(NSString *)str
+                   fontInfo:(PTYFontInfo*)fontInfo
+                      color:(NSColor*)color
+                         at:(NSPoint)pos
+                      width:(CGFloat)width
+                   fakeBold:(BOOL)fakeBold
+                  antiAlias:(BOOL)antiAlias {
+    NSDictionary* attrs;
+    attrs = [NSDictionary dictionaryWithObjectsAndKeys:
+                fontInfo.font, NSFontAttributeName,
+                color, NSForegroundColorAttributeName,
+                nil];
     NSGraphicsContext *ctx = [NSGraphicsContext currentContext];
     [ctx saveGraphicsState];
     [ctx setCompositingOperation:NSCompositeSourceOver];
@@ -6220,129 +6595,95 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [ctx restoreGraphicsState];
 }
 
-- (void)_drawComplexCharRun:(CharacterRun *)currentRun
-                        ctx:(CGContextRef)ctx
-               initialPoint:(NSPoint)initialPoint
-                  antiAlias:(BOOL)antiAlias
-{
-    [self _advancedDrawChar:[currentRun codes]
-                   numCodes:currentRun.range.length
-                   fontInfo:currentRun.fontInfo
-                      color:currentRun.color
-                         at:NSMakePoint(currentRun.x,
-                                        initialPoint.y)
-                      width:[currentRun advances][0].width
-                   fakeBold:currentRun.fakeBold
-                  antiAlias:antiAlias];
-}
-
-- (void)_drawBasicCharRunAdvanced:(CharacterRun *)currentRun
-                              ctx:(CGContextRef)ctx
-                     initialPoint:(NSPoint)initialPoint
-{
-    CGFloat x = currentRun.x;
-    for (int i = 0; i < currentRun.range.length; i++) {
-        [self _advancedDrawChar:[currentRun codes] + i
-                       numCodes:1
-                       fontInfo:currentRun.fontInfo
-                          color:currentRun.color
-                             at:NSMakePoint(x,
-                                            initialPoint.y)
-                          width:[currentRun advances][i].width
-                       fakeBold:currentRun.fakeBold
-                      antiAlias:currentRun.antiAlias];
-        x += [currentRun advances][i].width;
-    }
-}
-
-- (void)_drawBasicCharRun:(CharacterRun *)currentRun
-                      ctx:(CGContextRef)ctx
-             initialPoint:(NSPoint)initialPoint
-{
-    CGGlyph *glyphs = [currentRun glyphs];
-
-    CGContextSelectFont(ctx,
-                        [[currentRun.fontInfo.font fontName] UTF8String],
-                        [currentRun.fontInfo.font pointSize],
-                        kCGEncodingMacRoman);
-    CGContextSetFillColorSpace(ctx, [[currentRun.color colorSpace] CGColorSpace]);
-    int componentCount = [currentRun.color numberOfComponents];
-
-    CGFloat components[componentCount];
-    [currentRun.color getComponents:components];
-    CGContextSetFillColor(ctx, components);
-
-    double y = initialPoint.y + lineHeight + currentRun.fontInfo.baselineOffset;
-    int x = currentRun.x;
-    // Flip vertically and translate to (x, y).
-    CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
-                                                      0.0, -1.0,
-                                                      x,    y));
-
-    CGContextShowGlyphsWithAdvances(ctx, glyphs, [currentRun advances], currentRun.range.length);
-
-    if (currentRun.fakeBold) {
-        // If anti-aliased, drawing twice at the same position makes the strokes thicker.
-        // If not anti-alised, draw one pixel to the right.
-        CGContextSetTextMatrix(ctx, CGAffineTransformMake(1.0,  0.0,
-                                                          0.0, -1.0,
-                                                          x + (currentRun.antiAlias ? 0 : 1),
-                                                          y));
-
-        CGContextShowGlyphsWithAdvances(ctx, glyphs, [currentRun advances], currentRun.range.length);
-    }
-}
-
-- (void)_drawRuns:(NSPoint)initialPoint runs:(NSArray *)runs
-{
-    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
-    CGContextSetTextDrawingMode(ctx, kCGTextFill);
-
-    for (CharacterRun *currentRun in runs) {
-        CGContextSetShouldAntialias(ctx, currentRun.antiAlias);
-
-        if (currentRun.runType == kCharacterRunMultipleSimpleChars) {
-            if (currentRun.antiAlias && advancedFontRendering) {
-                [self _drawBasicCharRunAdvanced:currentRun
-                                            ctx:ctx
-                                   initialPoint:initialPoint];
-            } else {
-                [self _drawBasicCharRun:currentRun
-                                    ctx:ctx
-                           initialPoint:initialPoint];
+- (void)drawRun:(CRun *)currentRun
+            ctx:(CGContextRef)ctx
+   initialPoint:(NSPoint)initialPoint
+        storage:(CRunStorage *)storage {
+    NSPoint startPoint = NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y);
+    CGContextSetShouldAntialias(ctx, currentRun->attrs.antiAlias);
+    if (!currentRun->string) {
+        // Non-complex, except for glyphs we can't find.
+        while (currentRun->length) {
+            int firstComplexGlyph = [self _drawSimpleRun:currentRun
+                                                     ctx:ctx
+                                            initialPoint:initialPoint];
+            if (firstComplexGlyph < 0) {
+                break;
             }
-        } else {
-            [self _drawComplexCharRun:currentRun
-                                  ctx:ctx
-                         initialPoint:initialPoint
-                            antiAlias:currentRun.antiAlias];
+            CRun *complexRun = CRunSplit(currentRun, firstComplexGlyph);
+            [self _advancedDrawString:complexRun->string
+                             fontInfo:complexRun->attrs.fontInfo
+                                color:complexRun->attrs.color
+                                   at:NSMakePoint(initialPoint.x + complexRun->x, initialPoint.y)
+                                width:CRunGetAdvances(complexRun)[0].width
+                             fakeBold:complexRun->attrs.fakeBold
+                            antiAlias:complexRun->attrs.antiAlias];
+            CRunFree(complexRun);
         }
+    } else {
+        // Complex
+        [self _advancedDrawString:currentRun->string
+                         fontInfo:currentRun->attrs.fontInfo
+                            color:currentRun->attrs.color
+                               at:NSMakePoint(initialPoint.x + currentRun->x, initialPoint.y)
+                            width:CRunGetAdvances(currentRun)[0].width
+                         fakeBold:currentRun->attrs.fakeBold
+                        antiAlias:currentRun->attrs.antiAlias];
+    }
+
+    // Draw underline
+    if (currentRun->attrs.underline) {
+        [currentRun->attrs.color set];
+        CGFloat runWidth = 0;
+        int length = currentRun->string ? 1 : currentRun->length;
+        NSSize *advances = CRunGetAdvances(currentRun);
+        for (int i = 0; i < length; i++) {
+            runWidth += advances[i].width;
+        }
+        NSRectFill(NSMakeRect(startPoint.x,
+                              startPoint.y + lineHeight - 2,
+                              runWidth,
+                              1));
     }
 }
 
-- (void)_drawCharactersInLine:(screen_char_t*)theLine
+- (void)_drawRunsAt:(NSPoint)initialPoint
+                run:(CRun *)run
+            storage:(CRunStorage *)storage
+            context:(CGContextRef)ctx
+{
+    CGContextSetTextDrawingMode(ctx, kCGTextFill);
+    while (run) {
+        [self drawRun:run ctx:ctx initialPoint:initialPoint storage:storage];
+        run = run->next;
+    }
+}
+
+- (void)_drawCharactersInLine:(screen_char_t *)theLine
                       inRange:(NSRange)indexRange
               startingAtPoint:(NSPoint)initialPoint
                    bgselected:(BOOL)bgselected
                      reversed:(BOOL)reversed
                       bgColor:(NSColor*)bgColor
                       matches:(NSData*)matches
+                      context:(CGContextRef)ctx
 {
     const int width = [dataSource width];
-    SharedCharacterRunData *sharedData = [SharedCharacterRunData sharedCharacterRunDataWithCapacity:width];
-    NSMutableArray *runs = [NSMutableArray arrayWithCapacity:width];
-    [self _constructRuns:initialPoint
-                 theLine:theLine
-              sharedData:sharedData
-                    runs:runs
-                reversed:reversed
-              bgselected:bgselected
-                   width:width
-              indexRange:indexRange
-                 bgColor:bgColor
-                 matches:matches];
+    CRunStorage *storage = [CRunStorage cRunStorageWithCapacity:width];
+    CRun *run = [self _constructRuns:initialPoint
+                             theLine:theLine
+                            reversed:reversed
+                          bgselected:bgselected
+                               width:width
+                          indexRange:indexRange
+                             bgColor:bgColor
+                             matches:matches
+                             storage:storage];
 
-    [self _drawRuns:initialPoint runs:runs];
+    if (run) {
+        [self _drawRunsAt:initialPoint run:run storage:storage context:ctx];
+        CRunFree(run);
+    }
 }
 
 - (void)_drawStripesInRect:(NSRect)rect
@@ -6374,7 +6715,128 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [NSGraphicsContext restoreGraphicsState];
 }
 
-- (BOOL)_drawLine:(int)line AtY:(double)curY toPoint:(NSPoint*)toPoint
+// Draw a run of background color/image and foreground text.
+- (void)drawRunStartingAtIndex:(const int)firstIndex  // Index into line of first char
+                         endAt:(const int)lastIndex   // Index into line of last char
+                       yOrigin:(const double)yOrigin  // Top left corner of rect to draw into
+                       toPoint:(NSPoint * const)toPoint  // If not nil, an offset for drawing
+                    hasBGImage:(const BOOL)hasBGImage  // If set, draw a bg image (else solid colors only)
+             defaultBgColorPtr:(NSColor **)defaultBgColorPtr  // Pass in default bg color; may be changed.
+      alphaIfTransparencyInUse:(const double)alphaIfTransparencyInUse  // Alpha value to use if transparency is on
+                       bgColor:(const int)bgColor      // bg color code (or red component if 24 bit)
+                   bgColorMode:(const ColorMode)bgColorMode  // bg color mode
+                        bgBlue:(const int)bgBlue       // blue component if 24 bit
+                       bgGreen:(const int)bgGreen      // green component if 24 bit
+                      reversed:(const BOOL)reversed    // reverse video?
+                    bgselected:(const BOOL)bgselected  // is selected text?
+                       isMatch:(const BOOL)isMatch     // is Find On Page match?
+                       stripes:(const BOOL)stripes     // bg is striped?
+                          line:(screen_char_t *)theLine  // Whole screen line
+                       matches:(NSData *)matches // Bitmask of Find On Page matches
+                       context:(CGContextRef)ctx       // Graphics context
+{
+    NSColor *aColor = *defaultBgColorPtr;
+
+    NSRect bgRect = NSMakeRect(floor(MARGIN + firstIndex * charWidth),
+                               yOrigin,
+                               ceil((lastIndex - firstIndex) * charWidth),
+                               lineHeight);
+
+    if (hasBGImage) {
+        if (toPoint) {
+            [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
+                                                                         toPoint:NSMakePoint(toPoint->x + bgRect.origin.x,
+                                                                                             toPoint->y + bgRect.size.height)
+                                                                 useTransparency:[self useTransparency]];
+        } else {
+            [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
+                                                                 useTransparency:[self useTransparency]];
+        }
+    }
+    if (!hasBGImage ||
+        (isMatch && !bgselected) ||
+        !(bgColor == ALTSEM_BG_DEFAULT && bgColorMode == ColorModeAlternate) ||
+        bgselected) {
+        // There's no bg image, or there's a nondefault bg on a bg image.
+        // We are not drawing an unmolested background image. Some
+        // background fill must be drawn. If there is a background image
+        // it will be blended with the bg color.
+
+        if (isMatch && !bgselected) {
+            aColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:1];
+        } else if (bgselected) {
+            aColor = [self selectionColorForCurrentFocus];
+        } else {
+            if (reversed && bgColor == ALTSEM_BG_DEFAULT && bgColorMode == ColorModeAlternate) {
+                // Reverse video is only applied to default background-
+                // color chars.
+                aColor = [self colorForCode:ALTSEM_FG_DEFAULT
+                                      green:0
+                                       blue:0
+                                  colorMode:ColorModeAlternate
+                                       bold:NO
+                               isBackground:NO];
+            } else {
+                // Use the regular background color.
+                aColor = [self colorForCode:bgColor
+                                      green:bgGreen
+                                       blue:bgBlue
+                                  colorMode:bgColorMode
+                                       bold:NO
+                               isBackground:(bgColor == ALTSEM_BG_DEFAULT)];
+            }
+        }
+        aColor = [aColor colorWithAlphaComponent:alphaIfTransparencyInUse];
+        [aColor set];
+        if (toPoint) {
+            bgRect.origin.x += toPoint->x;
+            bgRect.origin.y = toPoint->y;
+        }
+        NSRectFillUsingOperation(bgRect,
+                                 hasBGImage ? NSCompositeSourceOver : NSCompositeCopy);
+    } else if (hasBGImage) {
+        // There is a bg image and no special background on it. Blend
+        // in the default background color.
+        aColor = [self colorForCode:ALTSEM_BG_DEFAULT
+                              green:0
+                               blue:0
+                          colorMode:ColorModeAlternate
+                               bold:NO
+                       isBackground:YES];
+        aColor = [aColor colorWithAlphaComponent:1 - blend];
+        [aColor set];
+        NSRectFillUsingOperation(bgRect, NSCompositeSourceOver);
+    }
+    *defaultBgColorPtr = aColor;
+
+    // Draw red stripes in the background if sending input to all sessions
+    if (stripes) {
+        [self _drawStripesInRect:bgRect];
+    }
+
+    NSPoint textOrigin;
+    if (toPoint) {
+        textOrigin = NSMakePoint(toPoint->x + MARGIN + firstIndex * charWidth,
+                                 toPoint->y);
+    } else {
+        textOrigin = NSMakePoint(MARGIN + firstIndex * charWidth,
+                                 yOrigin);
+    }
+    [self _drawCharactersInLine:theLine
+                        inRange:NSMakeRange(firstIndex, lastIndex - firstIndex)
+                startingAtPoint:textOrigin
+                     bgselected:bgselected
+                       reversed:reversed
+                        bgColor:aColor
+                        matches:matches
+                        context:ctx];
+}
+
+- (BOOL)_drawLine:(int)line
+              AtY:(double)curY
+          toPoint:(NSPoint*)toPoint
+        charRange:(NSRange)charRange
+          context:(CGContextRef)ctx
 {
     BOOL anyBlinking = NO;
 #ifdef DEBUG_DRAWING
@@ -6386,13 +6848,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     int WIDTH = [dataSource width];
     screen_char_t* theLine = [dataSource getLineAtIndex:line];
     PTYScrollView* scrollView = (PTYScrollView*)[self enclosingScrollView];
-    BOOL hasBGImage = [scrollView backgroundImage] != nil;
+    BOOL hasBGImage = [scrollView hasBackgroundImage];
     double selectedAlpha = 1.0 - transparency;
     double alphaIfTransparencyInUse = [self useTransparency] ? 1.0 - transparency : 1.0;
     BOOL reversed = [[dataSource terminal] screenMode];
     NSColor *aColor = nil;
 
-    // Redraw margins
+    // Redraw margins ------------------------------------------------------------------------------
     NSRect leftMargin = NSMakeRect(0, curY, MARGIN, lineHeight);
     NSRect rightMargin;
     NSRect visibleRect = [self visibleRect];
@@ -6402,7 +6864,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     rightMargin.size.height = lineHeight;
 
     aColor = [self colorForCode:ALTSEM_BG_DEFAULT
-             alternateSemantics:YES
+                          green:0
+                           blue:0
+                      colorMode:ColorModeAlternate
                            bold:NO
                    isBackground:YES];
 
@@ -6418,30 +6882,30 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                         toPoint:NSMakePoint(toPoint->x + rightMargin.origin.x,
                                                             toPoint->y + rightMargin.size.height)
                                 useTransparency:[self useTransparency]];
-                        // Blend default bg color over bg iamge.
-                        [[aColor colorWithAlphaComponent:1 - blend] set];
-                        NSRectFillUsingOperation(NSMakeRect(toPoint->x + leftMargin.origin.x,
-                                                                                                toPoint->y + leftMargin.origin.y,
-                                                                                                leftMargin.size.width,
-                                                                                                leftMargin.size.height), NSCompositeSourceOver);
-                        NSRectFillUsingOperation(NSMakeRect(toPoint->x + rightMargin.origin.x,
-                                                                                                toPoint->y + rightMargin.origin.y,
-                                                                                                rightMargin.size.width,
-                                                                                                rightMargin.size.height), NSCompositeSourceOver);
-                } else {
+            // Blend default bg color over bg iamge.
+            [[aColor colorWithAlphaComponent:1 - blend] set];
+            NSRectFillUsingOperation(NSMakeRect(toPoint->x + leftMargin.origin.x,
+                                                toPoint->y + leftMargin.origin.y,
+                                                leftMargin.size.width,
+                                                leftMargin.size.height), NSCompositeSourceOver);
+            NSRectFillUsingOperation(NSMakeRect(toPoint->x + rightMargin.origin.x,
+                                                toPoint->y + rightMargin.origin.y,
+                                                rightMargin.size.width,
+                                                rightMargin.size.height), NSCompositeSourceOver);
+        } else {
             [scrollView drawBackgroundImageRect:leftMargin
                                 useTransparency:[self useTransparency]];
             [scrollView drawBackgroundImageRect:rightMargin
                                 useTransparency:[self useTransparency]];
 
-                        // Blend default bg color over bg iamge.
-                        [[aColor colorWithAlphaComponent:1 - blend] set];
-                        NSRectFillUsingOperation(leftMargin, NSCompositeSourceOver);
-                        NSRectFillUsingOperation(rightMargin, NSCompositeSourceOver);
-                }
-                [aColor set];
+            // Blend default bg color over bg iamge.
+            [[aColor colorWithAlphaComponent:1 - blend] set];
+            NSRectFillUsingOperation(leftMargin, NSCompositeSourceOver);
+            NSRectFillUsingOperation(rightMargin, NSCompositeSourceOver);
+        }
+        [aColor set];
     } else {
-                // No BG image
+        // No BG image
         if (toPoint) {
             NSRectFill(NSMakeRect(toPoint->x + leftMargin.origin.x,
                                   toPoint->y,
@@ -6464,19 +6928,24 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         }
     }
 
+    // Draw text and background --------------------------------------------------------------------
     // Contiguous sections of background with the same colour
     // are combined into runs and draw as one operation
     int bgstart = -1;
-    int j = 0;
+    int j = charRange.location;
     int bgColor = 0;
-    BOOL bgAlt = NO;
+    int bgGreen = 0;
+    int bgBlue = 0;
+    ColorMode bgColorMode = ColorModeNormal;
     BOOL bgselected = NO;
     BOOL isMatch = NO;
     NSData* matches = [resultMap_ objectForKey:[NSNumber numberWithLongLong:line + [dataSource totalScrollbackOverflow]]];
     const char* matchBytes = [matches bytes];
 
-    // Iterate over each character in the line
-    while (j <= WIDTH) {
+    // Iterate over each character in the line.
+    // Go one past where we really need to go to simplify the code.  // TODO(georgen): Fix that.
+    int limit = charRange.location + charRange.length;
+    while (j < limit) {
         if (theLine[j].code == DWC_RIGHT) {
             // Do not draw the right-hand side of double-width characters.
             j++;
@@ -6509,109 +6978,47 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             match = theIndex < [matches length] && (matchBytes[theIndex] & bitMask);
         }
 
-        if (j != WIDTH && bgstart < 0) {
+        if (j != limit && bgstart < 0) {
             // Start new run
             bgstart = j;
             bgColor = theLine[j].backgroundColor;
-            bgAlt = theLine[j].alternateBackgroundSemantics;
+            bgGreen = theLine[j].bgGreen;
+            bgBlue = theLine[j].bgBlue;
+            bgColorMode = theLine[j].backgroundColorMode;
             bgselected = selected;
             isMatch = match;
         }
 
-        if (j != WIDTH &&
+        if (j != limit &&
             bgselected == selected &&
             theLine[j].backgroundColor == bgColor &&
-            match == isMatch &&
-            theLine[j].alternateBackgroundSemantics == bgAlt) {
+            theLine[j].bgGreen == bgGreen &&
+            theLine[j].bgBlue == bgBlue &&
+            theLine[j].backgroundColorMode == bgColorMode &&
+            match == isMatch) {
             // Continue the run
             j += (double_width ? 2 : 1);
         } else if (bgstart >= 0) {
             // This run is finished, draw it
-            NSRect bgRect = NSMakeRect(floor(MARGIN + bgstart * charWidth),
-                                       curY,
-                                       ceil((j - bgstart) * charWidth),
-                                       lineHeight);
 
-            if (hasBGImage) {
-                if (toPoint) {
-                    [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
-                                                                                 toPoint:NSMakePoint(toPoint->x + bgRect.origin.x,
-                                                                                                     toPoint->y + bgRect.size.height)
-                                                                         useTransparency:[self useTransparency]];
-                } else {
-                    [(PTYScrollView *)[self enclosingScrollView] drawBackgroundImageRect:bgRect
-                                                                         useTransparency:[self useTransparency]];
-                }
-            }
-            if (!hasBGImage ||
-                (isMatch && !bgselected) ||
-                !(bgColor == ALTSEM_BG_DEFAULT && bgAlt) ||
-                bgselected) {
-                // There's no bg image, or there's a nondefault bg on a bg image.
-                // We are not drawing an unmolested background image. Some
-                // background fill must be drawn. If there is a background image
-                // it will be blended 50/50.
-
-                if (isMatch && !bgselected) {
-                    aColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:1];
-                } else if (bgselected) {
-                    aColor = selectionColor;
-                } else {
-                    if (reversed && bgColor == ALTSEM_BG_DEFAULT && bgAlt) {
-                        // Reverse video is only applied to default background-
-                        // color chars.
-                        aColor = [self colorForCode:ALTSEM_FG_DEFAULT
-                                 alternateSemantics:YES
-                                               bold:NO
-                                       isBackground:NO];
-                    } else {
-                        // Use the regular background color.
-                        aColor = [self colorForCode:bgColor
-                                 alternateSemantics:bgAlt
-                                               bold:NO
-                                       isBackground:(bgColor == ALTSEM_BG_DEFAULT)];
-                    }
-                }
-                aColor = [aColor colorWithAlphaComponent:alphaIfTransparencyInUse];
-                [aColor set];
-                if (toPoint) {
-                    bgRect.origin.x += toPoint->x;
-                    bgRect.origin.y = toPoint->y;
-                }
-                NSRectFillUsingOperation(bgRect,
-                                         hasBGImage ? NSCompositeSourceOver : NSCompositeCopy);
-            } else if (hasBGImage) {
-                                // There is a bg image and no special background on it. Blend
-                                // in the default background color.
-                aColor = [self colorForCode:ALTSEM_BG_DEFAULT
-                         alternateSemantics:YES
-                                       bold:NO
-                               isBackground:YES];
-                aColor = [aColor colorWithAlphaComponent:1 - blend];
-                [aColor set];
-                                NSRectFillUsingOperation(bgRect, NSCompositeSourceOver);
-            }
-
-            // Draw red stripes in the background if sending input to all sessions
-            if (stripes) {
-                [self _drawStripesInRect:bgRect];
-            }
-
-            NSPoint textOrigin;
-            if (toPoint) {
-                textOrigin = NSMakePoint(toPoint->x + MARGIN + bgstart * charWidth,
-                                         toPoint->y);
-            } else {
-                textOrigin = NSMakePoint(MARGIN + bgstart*charWidth,
-                                         curY);
-            }
-            [self _drawCharactersInLine:theLine
-                                inRange:NSMakeRange(bgstart, j - bgstart)
-                        startingAtPoint:textOrigin
-                             bgselected:bgselected
-                               reversed:reversed
-                                bgColor:aColor
-                                matches:matches];
+            [self drawRunStartingAtIndex:bgstart
+                                   endAt:j
+                                 yOrigin:curY
+                                 toPoint:toPoint
+                              hasBGImage:hasBGImage
+                       defaultBgColorPtr:&aColor
+                alphaIfTransparencyInUse:alphaIfTransparencyInUse
+                                 bgColor:bgColor
+                             bgColorMode:bgColorMode
+                                  bgBlue:bgBlue
+                                 bgGreen:bgGreen
+                                reversed:reversed
+                              bgselected:bgselected
+                                 isMatch:isMatch
+                                 stripes:stripes
+                                    line:theLine
+                                 matches:matches
+                                 context:ctx];
             bgstart = -1;
             // Return to top of loop without incrementing j so this
             // character gets the chance to start its own run
@@ -6620,44 +7027,73 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             j += (double_width ? 2 : 1);
         }
     }
+    if (bgstart >= 0) {
+        // Draw last run, if necesary.
+        [self drawRunStartingAtIndex:bgstart
+                               endAt:j
+                             yOrigin:curY
+                             toPoint:toPoint
+                          hasBGImage:hasBGImage
+                   defaultBgColorPtr:&aColor
+            alphaIfTransparencyInUse:alphaIfTransparencyInUse
+                             bgColor:bgColor
+                         bgColorMode:bgColorMode
+                              bgBlue:bgBlue
+                             bgGreen:bgGreen
+                            reversed:reversed
+                          bgselected:bgselected
+                             isMatch:isMatch
+                             stripes:stripes
+                                line:theLine
+                             matches:matches
+                             context:ctx];
+    }
     return anyBlinking;
 }
 
 
 - (void)_drawCharacter:(screen_char_t)screenChar
                fgColor:(int)fgColor
-    alternateSemantics:(BOOL)fgAlt
+               fgGreen:(int)fgGreen
+                fgBlue:(int)fgBlue
+           fgColorMode:(ColorMode)fgColorMode
                 fgBold:(BOOL)fgBold
                    AtX:(double)X
                      Y:(double)Y
            doubleWidth:(BOOL)double_width
          overrideColor:(NSColor*)overrideColor
+               context:(CGContextRef)ctx
 {
     screen_char_t temp = screenChar;
     temp.foregroundColor = fgColor;
-    temp.alternateForegroundSemantics = fgAlt;
+    temp.fgGreen = fgGreen;
+    temp.fgBlue = fgBlue;
+    temp.foregroundColorMode = fgColorMode;
     temp.bold = fgBold;
-    SharedCharacterRunData *sharedData = [SharedCharacterRunData sharedCharacterRunDataWithCapacity:kMaxParts];
-    NSMutableArray *runs = [NSMutableArray arrayWithCapacity:kMaxParts];
 
+    CRunStorage *storage = [CRunStorage cRunStorageWithCapacity:1];
     // Draw the characters.
-    [self _constructRuns:NSMakePoint(X, Y)
-                 theLine:&temp
-              sharedData:sharedData
-                    runs:runs
-                reversed:NO
-              bgselected:NO
-                   width:[dataSource width]
-              indexRange:NSMakeRange(0, 1)
-                 bgColor:nil
-                 matches:nil];
-    // If an override color is given, change the runs' colors.
-    if (overrideColor) {
-        for (CharacterRun *run in runs) {
-            run.color = overrideColor;
+    CRun *run = [self _constructRuns:NSMakePoint(X, Y)
+                             theLine:&temp
+                            reversed:NO
+                          bgselected:NO
+                               width:[dataSource width]
+                          indexRange:NSMakeRange(0, 1)
+                             bgColor:nil
+                             matches:nil
+                             storage:storage];
+    if (run) {
+        CRun *head = run;
+        // If an override color is given, change the runs' colors.
+        if (overrideColor) {
+            while (run) {
+                run->attrs.color = overrideColor;
+                run = run->next;
+            }
         }
+        [self _drawRunsAt:NSMakePoint(X, Y) run:head storage:storage context:ctx];
+        CRunFree(head);
     }
-    [self _drawRuns:NSMakePoint(X, Y) runs:runs];
 
     // draw underline
     if (screenChar.underline && screenChar.code) {
@@ -6665,7 +7101,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             [overrideColor set];
         } else {
             [[self colorForCode:fgColor
-               alternateSemantics:fgAlt
+                          green:fgGreen
+                           blue:fgBlue
+                      colorMode:ColorModeAlternate
                            bold:fgBold
                    isBackground:NO] set];
         }
@@ -6696,7 +7134,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                         fg,
                         bg,
                         &len,
-                        0,
                         [[dataSource session] doubleWidth],
                         NULL);
 
@@ -6722,6 +7159,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                               width:(int)width
                              height:(int)height
                        cursorHeight:(double)cursorHeight
+                                ctx:(CGContextRef)ctx
 {
     // draw any text for NSTextInput
     if ([self hasMarkedText]) {
@@ -6730,8 +7168,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         screen_char_t buf[maxLen];
         screen_char_t fg = {0}, bg = {0};
         fg.foregroundColor = ALTSEM_FG_DEFAULT;
-        fg.alternateForegroundSemantics = YES;
+        fg.foregroundColorMode = ColorModeAlternate;
         fg.bold = NO;
+        fg.italic = NO;
         fg.blink = NO;
         fg.underline = NO;
         memset(&bg, 0, sizeof(bg));
@@ -6742,7 +7181,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                             fg,
                             bg,
                             &len,
-                            0,
                             [[dataSource session] doubleWidth],
                             &cursorIndex);
         int cursorX = 0;
@@ -6755,8 +7193,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         BOOL justWrapped = NO;
         BOOL foundCursor = NO;
         for (i = 0; i < len; ) {
-            SharedCharacterRunData *sharedData = [SharedCharacterRunData sharedCharacterRunDataWithCapacity:width * kMaxParts];
-            NSMutableArray *runs = [NSMutableArray arrayWithCapacity:width * kMaxParts];
             const int remainingCharsInBuffer = len - i;
             const int remainingCharsInLine = width - xStart;
             int charsInLine = MIN(remainingCharsInLine,
@@ -6783,17 +7219,20 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             NSRectFill(r);
 
             // Draw the characters.
-            [self _constructRuns:NSMakePoint(x, y)
-                         theLine:buf
-                      sharedData:sharedData
-                            runs:runs
-                        reversed:NO
-                      bgselected:NO
-                           width:[dataSource width]
-                      indexRange:NSMakeRange(i, charsInLine)
-                         bgColor:nil
-                         matches:nil];
-            [self _drawRuns:NSMakePoint(x, y) runs:runs];
+            CRunStorage *storage = [CRunStorage cRunStorageWithCapacity:charsInLine];
+            CRun *run = [self _constructRuns:NSMakePoint(x, y)
+                                     theLine:buf
+                                    reversed:NO
+                                  bgselected:NO
+                                       width:[dataSource width]
+                                  indexRange:NSMakeRange(i, charsInLine)
+                                     bgColor:nil
+                                     matches:nil
+                                     storage:storage];
+            if (run) {
+                [self _drawRunsAt:NSMakePoint(x, y) run:run storage:storage context:ctx];
+                CRunFree(run);
+            }
 
             // Draw an underline.
             [defaultFGColor set];
@@ -6878,13 +7317,17 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if ([[dataSource terminal] screenMode]) {
         // reversed
         return [self colorForCode:c.foregroundColor
-               alternateSemantics:c.alternateForegroundSemantics
+                            green:c.fgGreen
+                             blue:c.fgBlue
+                        colorMode:c.foregroundColorMode
                              bold:c.bold
                      isBackground:YES];
     } else {
         // normal
         return [self colorForCode:c.backgroundColor
-               alternateSemantics:c.alternateBackgroundSemantics
+                            green:c.bgGreen
+                             blue:c.bgBlue
+                        colorMode:c.backgroundColorMode
                              bold:false
                      isBackground:YES];
     }
@@ -6956,6 +7399,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (void)_drawCursorTo:(NSPoint*)toOrigin
 {
+    DLog(@"_drawCursorTo:%@", toOrigin ? (id)[NSValue valueWithPoint:*toOrigin] : (id)@"nil");
+
     int WIDTH, HEIGHT;
     screen_char_t* theLine;
     int yStart, x1;
@@ -6987,14 +7432,18 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
     cursorHeight = [self cursorHeight];
 
+    CGContextRef ctx = (CGContextRef)[[NSGraphicsContext currentContext] graphicsPort];
 
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (x1 != oldCursorX || yStart != oldCursorY) {
+        lastTimeCursorMoved_ = now;
+    }
     if ([self blinkingCursor] &&
         [[self window] isKeyWindow] &&
         [[[dataSource session] tab] activeSession] == [dataSource session] &&
-        x1 == oldCursorX &&
-        yStart == oldCursorY) {
+        now - lastTimeCursorMoved_ > 0.5) {
         // Allow the cursor to blink if it is configured, the window is key, this session is active
-        // in the tab, and the cursor has not moved since the last draw.
+        // in the tab, and the cursor has not moved for half a second.
         showCursor = blinkShow;
     } else {
         showCursor = YES;
@@ -7002,6 +7451,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
     // Draw the regular cursor only if there's not an IME open as it draws its
     // own cursor.
+    DLog(@"_drawCursorTo: hasMarkedText=%d, CURSOR=%d, showCursor=%d, x1=%d, yStart=%d, WIDTH=%d, HEIGHT=%d",
+         (int)[self hasMarkedText], (int)CURSOR, (int)showCursor, (int)x1, (int)yStart, (int)WIDTH, (int)HEIGHT);
     if (![self hasMarkedText] && CURSOR) {
         if (showCursor && x1 <= WIDTH && x1 >= 0 && yStart >= 0 && yStart < HEIGHT) {
             // get the cursor line
@@ -7019,6 +7470,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             if (x1 == WIDTH) {
                 screenChar = theLine[x1 - 1];
                 screenChar.code = 0;
+                screenChar.complexChar = NO;
             }
             int aChar = screenChar.code;
             if (aChar) {
@@ -7043,13 +7495,17 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             if (colorInvertedCursor) {
                 if (reversed) {
                     bgColor = [self colorForCode:screenChar.backgroundColor
-                              alternateSemantics:screenChar.alternateBackgroundSemantics
+                                           green:screenChar.bgGreen
+                                            blue:screenChar.bgBlue
+                                       colorMode:screenChar.backgroundColorMode
                                             bold:screenChar.bold
                                     isBackground:NO];
                     bgColor = [bgColor colorWithAlphaComponent:alpha];
                 } else {
                     bgColor = [self colorForCode:screenChar.foregroundColor
-                              alternateSemantics:screenChar.alternateForegroundSemantics
+                                           green:screenChar.fgGreen
+                                            blue:screenChar.fgBlue
+                                       colorMode:screenChar.foregroundColorMode
                                             bold:screenChar.bold
                                     isBackground:NO];
                     bgColor = [bgColor colorWithAlphaComponent:alpha];
@@ -7075,18 +7531,22 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 }
 
                 [bgColor set];
+                DLog(@"Set cursor color=%@", bgColor);
             } else {
                 bgColor = [self defaultCursorColor];
                 [[bgColor colorWithAlphaComponent:alpha] set];
+                DLog(@"Set cursor color=%@", [bgColor colorWithAlphaComponent:alpha]);
             }
             if ([self isFindingCursor]) {
                 [[self _randomColor] set];
+                DLog(@"Set random cursor color");
             }
 
             BOOL frameOnly;
             switch (cursorType_) {
                 case CURSOR_BOX:
                     // draw the box
+                    DLog(@"draw cursor box at %f,%f size %fx%f", (float)curX, (float)curY, (float)ceil(cursorWidth * (double_width ? 2 : 1)), cursorHeight);
                     if ([[self window] isKeyWindow] &&
                         [[[dataSource session] tab] activeSession] == [dataSource session]) {
                         frameOnly = NO;
@@ -7105,45 +7565,42 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                     if (aChar) {
                         // Have a char at the cursor position.
                         if (colorInvertedCursor && !frameOnly) {
+                            // Pick background color for text if is key window, otherwise use fg color for text.
                             int fgColor;
-                            BOOL fgAlt;
-                                                        BOOL fgBold;
+                            int fgGreen;
+                            int fgBlue;
+                            ColorMode fgColorMode;
+                            BOOL fgBold;
+                            BOOL isBold;
+                            NSColor* overrideColor = nil;
                             if ([[self window] isKeyWindow]) {
                                 // Draw a character in background color when
                                 // window is key.
                                 fgColor = screenChar.backgroundColor;
-                                fgAlt = screenChar.alternateBackgroundSemantics;
-                                                                fgBold = NO;
+                                fgGreen = screenChar.bgGreen;
+                                fgBlue = screenChar.bgBlue;
+                                fgColorMode = screenChar.backgroundColorMode;
+                                fgBold = NO;
                             } else {
                                 // Draw character in foreground color when there
                                 // is just a frame around it.
                                 fgColor = screenChar.foregroundColor;
-                                fgAlt = screenChar.alternateForegroundSemantics;
-                                                                fgBold = screenChar.bold;
+                                fgGreen = screenChar.fgGreen;
+                                fgBlue = screenChar.fgBlue;
+                                fgColorMode = screenChar.foregroundColorMode;
+                                fgBold = screenChar.bold;
                             }
-
-                            // Pick background color for text if is key window, otherwise use fg color for text.
-                            int theColor;
-                            BOOL alt;
-                            BOOL isBold;
-                            if ([[self window] isKeyWindow]) {
-                                theColor = screenChar.backgroundColor;
-                                alt = screenChar.alternateBackgroundSemantics;
-                                isBold = screenChar.bold;
-                            } else {
-                                theColor = screenChar.foregroundColor;
-                                alt = screenChar.alternateForegroundSemantics;
-                                isBold = screenChar.bold;
-                            }
+                            isBold = screenChar.bold;
 
                             // Ensure text has enough contrast by making it black/white if the char's color would be close to the cursor bg.
                             NSColor* proposedForeground = [[self colorForCode:fgColor
-                                                           alternateSemantics:fgAlt
+                                                                        green:fgGreen
+                                                                         blue:fgBlue
+                                                                    colorMode:fgColorMode
                                                                          bold:fgBold
                                                                  isBackground:NO] colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
                             CGFloat fgBrightness = [self perceivedBrightness:proposedForeground];
                             CGFloat bgBrightness = [self perceivedBrightness:[bgColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace]];
-                            NSColor* overrideColor = nil;
                             if (!frameOnly && fabs(fgBrightness - bgBrightness) < gSmartCursorFgThreshold) {
                                 // foreground and background are very similar. Just use black and
                                 // white.
@@ -7153,49 +7610,64 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                                     overrideColor = [self _dimmedColorFrom:[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:1]];
                                 }
                             }
+
                             BOOL saved = useBrightBold;
                             useBrightBold = NO;
                             [self _drawCharacter:screenChar
-                                         fgColor:theColor
-                              alternateSemantics:alt
+                                         fgColor:fgColor
+                                         fgGreen:fgGreen
+                                          fgBlue:fgBlue
+                                     fgColorMode:fgColorMode
                                           fgBold:isBold
                                              AtX:x1 * charWidth + MARGIN
                                                Y:curY + cursorHeight - lineHeight
                                      doubleWidth:double_width
-                                   overrideColor:overrideColor];
+                                   overrideColor:overrideColor
+                                         context:ctx];
                             useBrightBold = saved;
                         } else {
                             // Non-inverted cursor or cursor is frame
                             int theColor;
-                            BOOL alt;
+                            int theGreen;
+                            int theBlue;
+                            ColorMode theMode;
                             BOOL isBold;
                             if ([[self window] isKeyWindow]) {
                                 theColor = ALTSEM_CURSOR;
-                                alt = YES;
-                                isBold = screenChar.bold;
+                                theGreen = 0;
+                                theBlue = 0;
+                                theMode = ColorModeAlternate;
                             } else {
                                 theColor = screenChar.foregroundColor;
-                                alt = screenChar.alternateForegroundSemantics;
-                                isBold = screenChar.bold;
+                                theGreen = screenChar.fgGreen;
+                                theBlue = screenChar.fgBlue;
+                                theMode = screenChar.foregroundColorMode;
                             }
+                            isBold = screenChar.bold;
+
                             [self _drawCharacter:screenChar
                                          fgColor:theColor
-                              alternateSemantics:alt
+                                         fgGreen:theGreen
+                                          fgBlue:theBlue
+                                     fgColorMode:theMode
                                           fgBold:isBold
                                              AtX:x1 * charWidth + MARGIN
                                                Y:curY + cursorHeight - lineHeight
                                      doubleWidth:double_width
-                                   overrideColor:nil];
+                                   overrideColor:nil
+                                         context:ctx];
                         }
                     }
 
                     break;
 
                 case CURSOR_VERTICAL:
+                    DLog(@"draw cursor vline at %f,%f size %fx%f", (float)curX, (float)curY, (float)1, cursorHeight);
                     NSRectFill(NSMakeRect(curX, curY, 1, cursorHeight));
                     break;
 
                 case CURSOR_UNDERLINE:
+                    DLog(@"draw cursor underline at %f,%f size %fx%f", (float)curX, (float)curY, (float)ceil(cursorWidth * (double_width ? 2 : 1)), 2.0);
                     NSRectFill(NSMakeRect(curX,
                                           curY + lineHeight - 2,
                                           ceil(cursorWidth * (double_width ? 2 : 1)),
@@ -7207,6 +7679,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
     oldCursorX = x1;
     oldCursorY = yStart;
+    [selectedFont_ release];
+    selectedFont_ = nil;
 }
 
 - (void)_useBackgroundIndicatorChanged:(NSNotification *)notification
@@ -7550,6 +8024,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 // including some character in the middle of the "haystack" (source) string.
 - (NSString *)stringInString:(NSString *)haystack includingOffset:(int)offset fromCharacterSet:(NSCharacterSet *)charSet
 {
+    if (![haystack length]) {
+        return @"";
+    }
     NSRange firstBadCharRange = [haystack rangeOfCharacterFromSet:[charSet invertedSet]
                                                           options:NSBackwardsSearch
                                                             range:NSMakeRange(0, offset)];
@@ -7576,6 +8053,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSString *suffix = [self wrappedStringAtX:x y:y dir:1 respectHardNewlines:respectHardNewlines];
     NSString *joined = [prefix stringByAppendingString:suffix];
     NSString *possibleUrl = [self stringInString:joined includingOffset:[prefix length] fromCharacterSet:[PTYTextView urlCharacterSet]];
+    NSArray *punctuation = [NSArray arrayWithObjects:@".", @",", @";", nil];
+    for (NSString *pchar in punctuation) {
+        if ([possibleUrl hasSuffix:pchar]) {
+            possibleUrl = [possibleUrl substringToIndex:possibleUrl.length - 1];
+            break;
+        }
+    }
     NSString *possibleFilePart1 = [self stringInString:prefix includingOffset:[prefix length] - 1 fromCharacterSet:[PTYTextView filenameCharacterSet]];
     NSString *possibleFilePart2 = [self stringInString:suffix includingOffset:0 fromCharacterSet:[PTYTextView filenameCharacterSet]];
 
@@ -7940,13 +8424,14 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     NSSize dragOffset = NSMakeSize(0.0, 0.0);
 
     length = [aString length];
-    if([aString length] > 15)
+    if ([aString length] > 15) {
         length = 15;
+    }
 
     imageSize = NSMakeSize(charWidth*length, lineHeight);
     anImage = [[NSImage alloc] initWithSize: imageSize];
     [anImage lockFocus];
-    if([aString length] > 15)
+    if ([aString length] > 15)
         tmpString = [NSString stringWithFormat: @"%@...", [aString substringWithRange: NSMakeRange(0, 12)]];
     else
         tmpString = [aString substringWithRange: NSMakeRange(0, length)];
@@ -8114,37 +8599,55 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 #endif
     BOOL irEnabled = [[PreferencePanel sharedInstance] instantReplay];
     long long totalScrollbackOverflow = [dataSource totalScrollbackOverflow];
+    int allDirty = [dataSource isAllDirty] ? 1 : 0;
+    [dataSource resetAllDirty];
+
+    if (gExperimentalOptimization) {
+      int currentCursorX = [dataSource cursorX] - 1;
+      int currentCursorY = [dataSource cursorY] - 1;
+      if (prevCursorX != currentCursorX ||
+          prevCursorY != currentCursorY) {
+          // Mark previous and current cursor position dirty
+          DLog(@"Mark previous cursor position %d,%d dirty", prevCursorX, prevCursorY);
+          [dataSource setCharDirtyAtCursorX:prevCursorX Y:prevCursorY];
+          DLog(@"Mark current cursor position %d,%d dirty", currentCursorX, currentCursorY);
+          [dataSource setCharDirtyAtCursorX:currentCursorX Y:currentCursorY];
+
+          // Set prevCursor[XY] to new cursor position
+          prevCursorX = currentCursorX;
+          prevCursorY = currentCursorY;
+      }
+    }
     for (int y = lineStart; y < lineEnd; y++) {
-        NSMutableData* matches = [resultMap_ objectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
         for (int x = 0; x < WIDTH; x++) {
-            int dirtyFlags = [dataSource dirtyAtX:x Y:y-lineStart];
+            int dirtyFlags = allDirty || [dataSource isDirtyAtX:x Y:y-lineStart];
             if (dirtyFlags) {
-                if (irEnabled) {
-                    if (dirtyFlags & 1) {
-                        foundDirty = YES;
-                        if (matches) {
-                            // Remove highlighted search matches on this line.
-                            [resultMap_ removeObjectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
-                            matches = nil;
-                        }
-                    } else {
-                        for (int j = x+1; j < WIDTH; ++j) {
-                            if ([dataSource dirtyAtX:j Y:y-lineStart] & 1) {
-                                foundDirty = YES;
-                            }
+                foundDirty = YES;
+                // Remove highlighted search matches on this line.
+                [resultMap_ removeObjectForKey:[NSNumber numberWithLongLong:y + totalScrollbackOverflow]];
+
+                // Compute the dirty rect for this line.
+                NSRect dirtyRect = [self visibleRect];
+                dirtyRect.origin.y = y * lineHeight;
+                dirtyRect.size.height = lineHeight;
+                if (!allDirty) {
+                    dirtyRect.origin.x = MARGIN + x * charWidth;
+                    int maxX;
+                    for (maxX = WIDTH - 1; maxX > x; maxX--) {
+                        if ([dataSource isDirtyAtX:maxX Y:y-lineStart]) {
+                            break;
                         }
                     }
-                }
-                NSRect dirtyRect = [self visibleRect];
-                dirtyRect.origin.y = y*lineHeight;
-                dirtyRect.size.height = lineHeight;
-                if (gDebugLogging) {
-                    DebugLog([NSString stringWithFormat:@"%d is dirty", y]);
+                    dirtyRect.size.width = (maxX - x + 1) * charWidth;
+                    DLog(@"Line %d is dirty from %d to %d, set rect %@ dirty",
+                         y, x, maxX, [NSValue valueWithRect:dirtyRect]);
+                } else {
+                    DLog(@"Mark all of line %d dirty bc allDirty is set", y);
                 }
                 [self setNeedsDisplayInRect:dirtyRect];
 
 #ifdef DEBUG_DRAWING
-                char temp[100];
+                char temp[WIDTH + 1];
                 screen_char_t* p = [dataSource getLineAtScreenIndex:screenindex];
                 for (int i = 0; i < WIDTH; ++i) {
                     temp[i] = p[i].complexChar ? '#' : p[i].code;
@@ -8413,8 +8916,8 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
         if ([self blinkingCursor] &&
             [[self window] isKeyWindow]) {
-            // Blink flag flipped and there is a blinking cursor. Mark it dirty.
-            [self markCursorAsDirty];
+            // Blink flag flipped and there is a blinking cursor. Make it redraw.
+            [self setCursorNeedsDisplay];
         }
         DebugLog(@"time to redraw blinking text");
     }
