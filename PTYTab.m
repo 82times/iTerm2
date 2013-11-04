@@ -67,6 +67,8 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value);
 
 @implementation PTYTab
 
+@synthesize broadcasting = broadcasting_;
+
 // tab label attributes
 static NSColor *normalStateColor;
 static NSColor *chosenStateColor;
@@ -1056,7 +1058,7 @@ static NSString* FormatRect(NSRect r) {
                 NSView* referencePoint = splitViewIndex > 0 ? [[splitViewParent subviews] objectAtIndex:splitViewIndex - 1] : nil;
 
                 // Remove splitView
-                [splitView retain];
+                [[splitView retain] autorelease];
                 [splitView removeFromSuperview];
 
                 // Move grandchildren into grandparent.

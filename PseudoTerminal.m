@@ -191,6 +191,14 @@ NSString *sessionsKey = @"sessions";
 
 @implementation PseudoTerminal
 
+- (id)init {
+    NSLog(@"Plain old init called");
+    return [self initWithSmartLayout:YES
+                          windowType:WINDOW_TYPE_NORMAL
+                              screen:-1];
+}
+
+
 - (id)initWithSmartLayout:(BOOL)smartLayout
                windowType:(int)windowType
                    screen:(int)screenNumber
@@ -1145,7 +1153,7 @@ NSString *sessionsKey = @"sessions";
     NSMutableArray *sessions = [NSMutableArray array];
     int i;
     int n = [TABVIEW numberOfTabViewItems];
-    switch (broadcastMode_) {
+    switch ([self broadcastMode]) {
         case BROADCAST_OFF:
             break;
 
@@ -1196,7 +1204,7 @@ NSString *sessionsKey = @"sessions";
 
 - (BOOL)broadcastInputToSession:(PTYSession *)session
 {
-    switch (broadcastMode_) {
+    switch ([self broadcastMode]) {
         case BROADCAST_OFF:
             return NO;
 
@@ -1504,11 +1512,11 @@ NSString *sessionsKey = @"sessions";
         [[addressbookEntry objectForKey:KEY_SPACE] intValue] == -1) {
         [[self window] setCollectionBehavior:[[self window] collectionBehavior] | NSWindowCollectionBehaviorCanJoinAllSpaces];
     }
-        if ([arrangement objectForKey:TERMINAL_GUID] &&
+    if ([arrangement objectForKey:TERMINAL_GUID] &&
         [[arrangement objectForKey:TERMINAL_GUID] isKindOfClass:[NSString class]]) {
-                [terminalGuid_ autorelease];
-                terminalGuid_ = [[arrangement objectForKey:TERMINAL_GUID] retain];
-        }
+        [terminalGuid_ autorelease];
+        terminalGuid_ = [[arrangement objectForKey:TERMINAL_GUID] retain];
+    }
 
     [self fitTabsToWindow];
 }
@@ -1971,6 +1979,7 @@ NSString *sessionsKey = @"sessions";
         if ([[aSession TEXTVIEW] isFindingCursor]) {
             [[aSession TEXTVIEW] endFindCursor];
         }
+        [[aSession TEXTVIEW] removeUnderline];
     }
 
     PtyLog(@"PseudoTerminal windowDidResignKey");
@@ -2041,9 +2050,16 @@ NSString *sessionsKey = @"sessions";
 {
     PtyLog(@"%s(%d):-[PseudoTerminal windowDidResignMain:%@]",
           __FILE__, __LINE__, aNotification);
-    if (_fullScreen && !togglingFullScreen_) {
-        [self toggleFullScreenMode:nil];
-    }
+    // Note: there used to be code here that would toggle fullscreen mode. I can't figure out
+    // why it existed. It was added in the original iTerm to help avoid users getting "stuck"
+    // in fullscreen mode, then commented out in a later revision without comment. During a big
+    // refactor, iTerm2 brought it back for reasons that were unclear. It was causing problems
+    // with toggling fullscreen from top-of-screen windows so I removed it because it didn't seem
+    // to provide any benefit. I'll leave this here as a reminder in case a bug pops up. 10/6/13
+    // if (_fullScreen && !togglingFullScreen_) {
+    //     [self toggleFullScreenMode:nil];
+    // }
+
     // update the cursor
     [[[self currentSession] TEXTVIEW] refresh];
     [[[self currentSession] TEXTVIEW] setNeedsDisplay:YES];
@@ -2310,11 +2326,8 @@ NSString *sessionsKey = @"sessions";
 {
     if ([self lionFullScreen] ||
         (windowType_ != WINDOW_TYPE_FULL_SCREEN &&
-         windowType_ != WINDOW_TYPE_TOP &&
-         windowType_ != WINDOW_TYPE_BOTTOM &&
-         windowType_ != WINDOW_TYPE_LEFT &&
-         windowType_ != WINDOW_TYPE_RIGHT &&
          IsLionOrLater() &&
+         !isHotKeyWindow_ &&  // NSWindowCollectionBehaviorFullScreenAuxiliary window can't enter Lion fullscreen mode properly
          [[PreferencePanel sharedInstance] lionStyleFullscreen])) {
         // Is 10.7 Lion or later.
         [[self ptyWindow] performSelector:@selector(toggleFullScreen:) withObject:self];
@@ -2363,11 +2376,6 @@ NSString *sessionsKey = @"sessions";
 - (void)toggleTraditionalFullScreenMode
 {
     [SessionView windowDidResize];
-    if (windowType_ == WINDOW_TYPE_TOP || windowType_ == WINDOW_TYPE_BOTTOM
-        || windowType_ == WINDOW_TYPE_LEFT || windowType_ == WINDOW_TYPE_RIGHT) {
-        // TODO: would be nice if you could toggle top windows to fullscreen
-        return;
-    }
     PtyLog(@"toggleFullScreenMode called");
     PseudoTerminal *newTerminal;
     if (!_fullScreen) {
@@ -2376,6 +2384,7 @@ NSString *sessionsKey = @"sessions";
                                                        windowType:WINDOW_TYPE_FORCE_FULL_SCREEN
                                                            screen:[[NSScreen screens] indexOfObjectIdenticalTo:currentScreen]];
         newTerminal->oldFrame_ = [[self window] frame];
+        newTerminal->savedWindowType_ = windowType_;
         [[newTerminal window] setOpaque:NO];
     } else {
         // If a window is created while the menu bar is hidden then its
@@ -2385,10 +2394,9 @@ NSString *sessionsKey = @"sessions";
         // hiding the menu bar must be done after setting the window's frame.
         [self showMenuBar];
         PtyLog(@"toggleFullScreenMode - allocate new terminal");
-        // TODO: restore previous window type
         NSScreen *currentScreen = [[[[iTermController sharedInstance] currentTerminal] window] screen];
         newTerminal = [[PseudoTerminal alloc] initWithSmartLayout:NO
-                                                       windowType:WINDOW_TYPE_NORMAL
+                                                       windowType:savedWindowType_
                                                        screen:[[NSScreen screens] indexOfObjectIdenticalTo:currentScreen]];
         PtyLog(@"toggleFullScreenMode - set new frame to old frame: %fx%f", oldFrame_.size.width, oldFrame_.size.height);
         [[newTerminal window] setFrame:oldFrame_ display:YES];
@@ -2429,6 +2437,9 @@ NSString *sessionsKey = @"sessions";
     }
     PtyLog(@"toggleFullScreenMode - copy settings");
     [newTerminal copySettingsFrom:self];
+
+    newTerminal->isHotKeyWindow_ = isHotKeyWindow_;
+    isHotKeyWindow_ = NO;
 
     PtyLog(@"toggleFullScreenMode - calling addInTerminals");
     [[iTermController sharedInstance] addInTerminals:newTerminal];
@@ -2935,6 +2946,8 @@ NSString *sessionsKey = @"sessions";
         [[aSession TEXTVIEW] setNeedsDisplay:YES];
         [aSession updateDisplay];
         [aSession scheduleUpdateIn:kFastTimerIntervalSec];
+		[self setDimmingForSession:aSession];
+		[[aSession view] setBackgroundDimmed:![[self window] isKeyWindow]];
     }
 
     for (PTYSession *session in [self sessions]) {
@@ -2969,6 +2982,8 @@ NSString *sessionsKey = @"sessions";
       [aSession setFocused:(s == activeSession)];
     }
     [self showOrHideInstantReplayBar];
+    iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+    [itad updateBroadcastMenuState];
 }
 
 - (void)showOrHideInstantReplayBar
@@ -3003,6 +3018,8 @@ NSString *sessionsKey = @"sessions";
     NSLog(@"%s(%d):-[PseudoTerminal tabView:willRemoveTabViewItem]", __FILE__, __LINE__);
 #endif
     [self saveAffinitiesLater:[tabViewItem identifier]];
+	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+	[itad updateBroadcastMenuState];
 }
 
 - (void)tabView:(NSTabView *)tabView willAddTabViewItem:(NSTabViewItem *)tabViewItem
@@ -3013,6 +3030,8 @@ NSString *sessionsKey = @"sessions";
 
     [self tabView:tabView willInsertTabViewItem:tabViewItem atIndex:[tabView numberOfTabViewItems]];
     [self saveAffinitiesLater:[tabViewItem identifier]];
+	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+	[itad updateBroadcastMenuState];
 }
 
 - (void)tabView:(NSTabView *)tabView willInsertTabViewItem:(NSTabViewItem *)tabViewItem atIndex:(int)anIndex
@@ -3028,6 +3047,8 @@ NSString *sessionsKey = @"sessions";
       [[theTab tmuxController] setClientSize:[theTab tmuxSize]];
     }
     [self saveAffinitiesLater:[tabViewItem identifier]];
+	iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+	[itad updateBroadcastMenuState];
 }
 
 - (BOOL)tabView:(NSTabView*)tabView shouldCloseTabViewItem:(NSTabViewItem *)tabViewItem
@@ -3594,7 +3615,7 @@ NSString *sessionsKey = @"sessions";
 
 - (BOOL)sendInputToAllSessions
 {
-    return broadcastMode_ != BROADCAST_OFF;
+    return [self broadcastMode] != BROADCAST_OFF;
 }
 
 -(void)replaySession:(PTYSession *)oldSession
@@ -4292,15 +4313,19 @@ NSString *sessionsKey = @"sessions";
 
 - (BroadcastMode)broadcastMode
 {
-    return broadcastMode_;
+    if ([[self currentTab] isBroadcasting]) {
+		    return BROADCAST_TO_ALL_PANES;
+	} else {
+		    return broadcastMode_;
+	}
 }
 
 - (void)setBroadcastMode:(BroadcastMode)mode
 {
-    if (mode != BROADCAST_CUSTOM && mode == broadcastMode_) {
+    if (mode != BROADCAST_CUSTOM && mode == [self broadcastMode]) {
         mode = BROADCAST_OFF;
     }
-    if (mode != BROADCAST_OFF && broadcastMode_ == BROADCAST_OFF) {
+    if (mode != BROADCAST_OFF && [self broadcastMode] == BROADCAST_OFF) {
         if (NSRunAlertPanel(@"Warning!",
                             @"Keyboard input will be sent to multiple sessions.",
                             @"OK",
@@ -4309,8 +4334,14 @@ NSString *sessionsKey = @"sessions";
             return;
         }
     }
+	if (mode == BROADCAST_TO_ALL_PANES) {
+		[[self currentTab] setBroadcasting:YES];
+		mode = BROADCAST_OFF;
+	} else {
+		[[self currentTab] setBroadcasting:NO];
+	}
     broadcastMode_ = mode;
-        [self setDimmingForSessions];
+	[self setDimmingForSessions];
     iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
     [itad updateBroadcastMenuState];
 }
@@ -4318,8 +4349,9 @@ NSString *sessionsKey = @"sessions";
 - (void)toggleBroadcastingInputToSession:(PTYSession *)session
 {
     NSNumber *n = [NSNumber numberWithInt:[[session view] viewId]];
-    switch (broadcastMode_) {
+    switch ([self broadcastMode]) {
         case BROADCAST_TO_ALL_PANES:
+            [[self currentTab] setBroadcasting:NO];
             [broadcastViewIds_ removeAllObjects];
             for (PTYSession *aSession in [[self currentTab] sessions]) {
                 [broadcastViewIds_ addObject:[NSNumber numberWithInt:[[aSession view] viewId]]];
@@ -4431,30 +4463,30 @@ NSString *sessionsKey = @"sessions";
 - (void)setDimmingForSession:(PTYSession *)aSession
 {
     BOOL canDim = [[PreferencePanel sharedInstance] dimInactiveSplitPanes];
-        if (!canDim) {
-                [[aSession view] setDimmed:NO];
-        } else if (aSession == [[aSession tab] activeSession]) {
-                [[aSession view] setDimmed:NO];
-        } else if (![self broadcastInputToSession:aSession]) {
-                // Session is not the active session and we're not broadcasting to it.
-                [[aSession view] setDimmed:YES];
-        } else if ([self broadcastInputToSession:[self currentSession]]) {
-                // Session is not active, we are broadcasting to it, and the current
-                // session is also broadcasting.
-                [[aSession view] setDimmed:NO];
-        } else {
-                // Session is is not active, we are broadcasting to it, but we are not
-                // broadcasting to the current session.
-                [[aSession view] setDimmed:YES];
-        }
-        [[aSession view] setNeedsDisplay:YES];
+    if (!canDim) {
+        [[aSession view] setDimmed:NO];
+    } else if (aSession == [[aSession tab] activeSession]) {
+        [[aSession view] setDimmed:NO];
+    } else if (![self broadcastInputToSession:aSession]) {
+        // Session is not the active session and we're not broadcasting to it.
+        [[aSession view] setDimmed:YES];
+    } else if ([self broadcastInputToSession:[self currentSession]]) {
+        // Session is not active, we are broadcasting to it, and the current
+        // session is also broadcasting.
+        [[aSession view] setDimmed:NO];
+    } else {
+        // Session is is not active, we are broadcasting to it, but we are not
+        // broadcasting to the current session.
+        [[aSession view] setDimmed:YES];
+    }
+    [[aSession view] setNeedsDisplay:YES];
 }
 
 - (void)setDimmingForSessions
 {
-        for (PTYSession *aSession in [self sessions]) {
-                [self setDimmingForSession:aSession];
-        }
+	for (PTYSession *aSession in [self sessions]) {
+		[self setDimmingForSession:aSession];
+	}
 }
 
 - (BOOL)anyTabIsTmuxTab

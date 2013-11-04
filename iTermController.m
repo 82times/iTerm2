@@ -516,6 +516,7 @@ static BOOL initDone = NO;
                 }
             }
         }
+        assert(terminal);
 
         // Remove it from terminalsCopy.
         [terminalsCopy removeObjectAtIndex:bestIndex];
@@ -946,6 +947,9 @@ static BOOL initDone = NO;
         aDict = [self defaultBookmark];
     }
 
+    if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
+        theTerm = nil;
+    }
     // Where do we execute this command?
     BOOL toggle = NO;
     if (theTerm == nil) {
@@ -1016,6 +1020,10 @@ static BOOL initDone = NO;
             [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
             aDict = temp;
         }
+    }
+
+    if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
+        theTerm = nil;
     }
 
     // Where do we execute this command?
@@ -1109,6 +1117,10 @@ static BOOL initDone = NO;
         if (!aDict) {
             aDict = tempDict;
         }
+    }
+
+    if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
+        theTerm = nil;
     }
 
     // Where do we execute this command?
@@ -1483,7 +1495,7 @@ static void RollOutHotkeyTerm(PseudoTerminal* term, BOOL itermWasActiveWhenHotke
         return;
     }
     BOOL temp = [term isHotKeyWindow];
-    NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
+    NSRect screenFrame = [[NSScreen mainScreen] frame];
     NSRect rect = [[term window] frame];
     switch ([term windowType]) {
         case WINDOW_TYPE_NORMAL:
@@ -1502,7 +1514,7 @@ static void RollOutHotkeyTerm(PseudoTerminal* term, BOOL itermWasActiveWhenHotke
             break;
 
         case WINDOW_TYPE_BOTTOM:
-            rect.origin.y = screenFrame.origin.y-rect.size.height;
+            rect.origin.y = screenFrame.origin.y - rect.size.height;
             [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
             [[[term window] animator] setFrame:rect display:YES];
             [[[term window] animator] setAlphaValue:0];
@@ -2086,7 +2098,7 @@ NSString *terminalsKey = @"terminals";
     [self updateWindowTitles];
 }
 
--(void)insertInTerminals:(PseudoTerminal *)object atIndex:(unsigned)theIndex
+- (void)insertInTerminals:(PseudoTerminal *)object atIndex:(unsigned)theIndex
 {
     if ([terminalWindows containsObject:object] == YES) {
         return;
@@ -2094,14 +2106,10 @@ NSString *terminalsKey = @"terminals";
 
     [terminalWindows insertObject:object atIndex:theIndex];
     [self updateWindowTitles];
-    if (![object isInitialized]) {
-        [object initWithSmartLayout:YES
-                         windowType:WINDOW_TYPE_NORMAL
-                             screen:-1];
-    }
+    assert([object isInitialized]);
 }
 
--(void)removeFromTerminalsAtIndex:(unsigned)theIndex
+- (void)removeFromTerminalsAtIndex:(unsigned)theIndex
 {
     // NSLog(@"iTerm: removeFromTerminalsAtInde %d", theIndex);
     [terminalWindows removeObjectAtIndex:theIndex];
