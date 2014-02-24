@@ -11,6 +11,8 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import "ScreenChar.h"
 
+@class CRunSet;
+
 // Backing storage for CRuns.
 @interface CRunStorage : NSObject {
 	// There are |capacity_| elements in each of these, of which |used_|
@@ -24,7 +26,7 @@
     int used_;  // Number of elements in use.
 
     // Like an autorelease pool, but avoids multiple retain/release's per object.
-    NSMutableSet *colors_;
+    CRunSet *colors_;
 }
 
 // Create a new CRunStorage with space preallocated for |capacity| characters.
@@ -52,7 +54,11 @@ typedef struct {
     BOOL antiAlias;           // Use anti-aliasing?
     NSColor *color;           // Foreground color. Do not assign directly to this. Use CRunAttrsSetColor().
     BOOL fakeBold;            // Should bold text be rendered by drawing text twice with a 1px shift?
+    BOOL fakeItalic;          // Should text be skewed?
     BOOL underline;
+    unichar imageCode;        // Gives the image code, or 0 if not an image.
+    int imageLine;            // Line number of the image cell. Valid if image is positive.
+    int imageColumn;          // Column number of the image cell. Valid if image is positive.
     PTYFontInfo *fontInfo;    // Font to use. WEAK.
 } CAttrs;
 
@@ -68,8 +74,10 @@ struct CRun {
     int length;               // Number of codes/glyphs/advances.
     int index;                // -1 if nothing allocated, else start index of codes, glyphs, advances
     NSString *string;         // If set then there are no codes or glyphs, but may be advances.
+    int key;                  // For complex chars, this is the key that gives the sting.
     BOOL terminated;          // No more appends allowed (will go into |next|)
     CRunStorage *storage;     // Backing store for codes, glyphs, and advances.
+    int numImageCells;        // Number of consecutive image cells.
     CRun *next;               // Next run in linked list.
 };
 

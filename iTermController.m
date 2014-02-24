@@ -32,40 +32,28 @@
 #define DEBUG_METHOD_TRACE    0
 
 #import "iTermController.h"
+
+#import "FutureMethods.h"
+#import "HotkeyWindowController.h"
+#import "ITAddressBookMgr.h"
+#import "NSStringITerm.h"
+#import "NSView+RecursiveDescription.h"
+#import "PTYSession.h"
+#import "PTYTab.h"
+#import "PasteboardHistory.h"
 #import "PreferencePanel.h"
 #import "PseudoTerminal.h"
-#import "PTYSession.h"
-#import "VT100Screen.h"
-#import "NSStringITerm.h"
-#import "ITAddressBookMgr.h"
-#import <iTermGrowlDelegate.h>
-#import "PasteboardHistory.h"
-#import <Carbon/Carbon.h>
-#import "iTermApplicationDelegate.h"
-#import "iTermApplication.h"
 #import "UKCrashReporter/UKCrashReporter.h"
-#import "PTYTab.h"
-#import "iTermKeyBindingMgr.h"
-#import "PseudoTerminal.h"
-#import "iTermExpose.h"
-#import "FutureMethods.h"
-#import "GTMCarbonEvent.h"
-#import "iTerm.h"
+#import "VT100Screen.h"
 #import "WindowArrangements.h"
-#import "NSView+iTerm.h"
-#import <objc/runtime.h>
-
-//#define HOTKEY_WINDOW_VERBOSE_LOGGING
-#ifdef HOTKEY_WINDOW_VERBOSE_LOGGING
-#define HKWLog NSLog
-#else
-#define HKWLog(args...) \
-do { \
-if (gDebugLogging) { \
-DebugLog([NSString stringWithFormat:args]); \
-} \
-} while (0)
-#endif
+#import "iTerm.h"
+#import "iTermApplication.h"
+#import "iTermApplicationDelegate.h"
+#import "iTermExpose.h"
+#import "iTermGrowlDelegate.h"
+#import "iTermGrowlDelegate.h"
+#import "iTermKeyBindingMgr.h"
+#include <objc/runtime.h>
 
 @interface NSApplication (Undocumented)
 - (void)_cycleWindowsReversed:(BOOL)back;
@@ -104,49 +92,26 @@ BOOL IsMountainLionOrLater(void) {
     return result;
 }
 
-static BOOL UncachedIsLionOrLater(void) {
+static BOOL UncachedIsMavericksOrLater(void) {
     unsigned major;
     unsigned minor;
     if ([iTermController getSystemVersionMajor:&major minor:&minor bugFix:nil]) {
-        return (major == 10 && minor >= 7) || (major > 10);
+        return (major == 10 && minor >= 9) || (major > 10);
     } else {
         return NO;
     }
 }
 
-BOOL IsLionOrLater(void) {
+BOOL IsMavericksOrLater(void) {
     static BOOL result;
     static BOOL initialized;
     if (!initialized) {
         initialized = YES;
-        result = UncachedIsLionOrLater();
+        result = UncachedIsMavericksOrLater();
     }
     return result;
 }
 
-BOOL IsSnowLeopardOrLater(void) {
-    unsigned major;
-    unsigned minor;
-    if ([iTermController getSystemVersionMajor:&major minor:&minor bugFix:nil]) {
-        return (major == 10 && minor >= 6) || (major > 10);
-    } else {
-        return NO;
-    }
-}
-
-BOOL IsLeopard(void) {
-    unsigned major;
-    unsigned minor;
-    if ([iTermController getSystemVersionMajor:&major minor:&minor bugFix:nil]) {
-        return (major == 10 && minor == 5);
-    } else {
-        return NO;
-    }
-}
-
-@interface iTermController ()
-- (void)restorePreviouslyActiveApp;
-@end
 
 @implementation iTermController
 
@@ -616,7 +581,7 @@ static BOOL initDone = NO;
 - (void)terminalWillClose:(PseudoTerminal*)theTerminalWindow
 {
     if ([theTerminalWindow isHotKeyWindow]) {
-        [self restorePreviouslyActiveApp];
+        [[iTermController sharedInstance] restorePreviouslyActiveApp];
     }
     if (FRONT == theTerminalWindow) {
         [self setCurrentTerminal:nil];
@@ -624,6 +589,52 @@ static BOOL initDone = NO;
     if (theTerminalWindow) {
         [self removeFromTerminalsAtIndex:[terminalWindows indexOfObject:theTerminalWindow]];
     }
+}
+
+- (void)storePreviouslyActiveApp
+{
+    NSDictionary *activeAppDict = [[NSWorkspace sharedWorkspace] activeApplication];
+    [previouslyActiveAppPID_ release];
+    previouslyActiveAppPID_ = nil;
+    if (![[activeAppDict objectForKey:@"NSApplicationBundleIdentifier"] isEqualToString:@"com.googlecode.iterm2"]) {
+        previouslyActiveAppPID_ = [[activeAppDict objectForKey:@"NSApplicationProcessIdentifier"] copy];
+    }
+}
+
+- (void)restorePreviouslyActiveApp
+{
+    if (!previouslyActiveAppPID_) {
+        return;
+    }
+
+    id app;
+    // NSInvocation hackery because we need to build against the 10.5 sdk and call a
+    // 10.6 function.
+
+    // app = [runningApplicationClass_ runningApplicationWithProcessIdentifier:[previouslyActiveAppPID_ intValue]];
+    NSMethodSignature *sig = [object_getClass(runningApplicationClass_) instanceMethodSignatureForSelector:@selector(runningApplicationWithProcessIdentifier:)];
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    [inv setTarget:runningApplicationClass_];
+    [inv setSelector:@selector(runningApplicationWithProcessIdentifier:)];
+    int appId = [previouslyActiveAppPID_ intValue];
+    [inv setArgument:&appId atIndex:2];
+    [inv invoke];
+    [inv getReturnValue:&app];
+
+    if (app) {
+        DLog(@"Restore app %@", app);
+        //[app activateWithOptions:0];
+        sig = [[app class] instanceMethodSignatureForSelector:@selector(activateWithOptions:)];
+        assert(sig);
+        inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:app];
+        [inv setSelector:@selector(activateWithOptions:)];
+        int opts = 0;
+        [inv setArgument:&opts atIndex:2];
+        [inv invoke];
+    }
+    [previouslyActiveAppPID_ release];
+    previouslyActiveAppPID_ = nil;
 }
 
 // Build sorted list of encodings
@@ -783,7 +794,30 @@ static BOOL initDone = NO;
     [self _newSessionsInManyWindowsInMenu:[sender menu]];
 }
 
-- (PseudoTerminal*)_openNewSessionsFromMenu:(NSMenu*)parent inNewWindow:(BOOL)newWindow usedGuids:(NSMutableSet*)usedGuids bookmarks:(NSMutableArray*)bookmarks
+- (PseudoTerminal *)terminalWithTab:(PTYTab *)tab
+{
+    for (PseudoTerminal *term in [self terminals]) {
+        if ([[term tabs] containsObject:tab]) {
+            return term;
+        }
+    }
+    return nil;
+}
+
+- (PseudoTerminal *)terminalWithSession:(PTYSession *)session
+{
+    for (PseudoTerminal *term in [self terminals]) {
+        if ([[term sessions] containsObject:session]) {
+            return term;
+        }
+    }
+    return nil;
+}
+
+- (PseudoTerminal *)_openNewSessionsFromMenu:(NSMenu*)parent
+                                 inNewWindow:(BOOL)newWindow
+                                   usedGuids:(NSMutableSet*)usedGuids
+                                   bookmarks:(NSMutableArray*)bookmarks
 {
     BOOL doOpen = usedGuids == nil;
     if (doOpen) {
@@ -812,7 +846,7 @@ static BOOL initDone = NO;
         for (Profile* bookmark in bookmarks) {
             if (!term) {
                 PTYSession* session = [self launchBookmark:bookmark inTerminal:nil];
-                term = [[session tab] realParentWindow];
+                term = [self terminalWithSession:session];
             } else {
                 [self launchBookmark:bookmark inTerminal:term];
             }
@@ -824,13 +858,18 @@ static BOOL initDone = NO;
 
 - (void)newSessionsInWindow:(id)sender
 {
-    [self _openNewSessionsFromMenu:[sender menu] inNewWindow:[sender isAlternate] usedGuids:nil bookmarks:nil];
+    [self _openNewSessionsFromMenu:[sender menu]
+                       inNewWindow:[sender isAlternate]
+                         usedGuids:nil
+                         bookmarks:nil];
 }
 
 - (void)newSessionsInNewWindow:(id)sender
 {
-    [self _openNewSessionsFromMenu:[sender menu] inNewWindow:YES
-                         usedGuids:nil bookmarks:nil];
+    [self _openNewSessionsFromMenu:[sender menu]
+                       inNewWindow:YES
+                         usedGuids:nil
+                         bookmarks:nil];
 }
 
 - (void)addBookmarksToMenu:(NSMenu *)aMenu withSelector:(SEL)selector openAllSelector:(SEL)openAllSelector startingAt:(int)startingAt
@@ -890,12 +929,11 @@ static BOOL initDone = NO;
     }
 }
 
-- (int)_windowTypeForBookmark:(Profile*)aDict
+- (int)windowTypeForBookmark:(Profile*)aDict
 {
     if ([aDict objectForKey:KEY_WINDOW_TYPE]) {
         int windowType = [[aDict objectForKey:KEY_WINDOW_TYPE] intValue];
         if (windowType == WINDOW_TYPE_FULL_SCREEN &&
-            IsLionOrLater() &&
             [[PreferencePanel sharedInstance] lionStyleFullscreen]) {
             return WINDOW_TYPE_LION_FULL_SCREEN;
         } else {
@@ -905,6 +943,16 @@ static BOOL initDone = NO;
         return WINDOW_TYPE_NORMAL;
     }
 }
+
+- (void)reloadAllBookmarks
+{
+    int n = [self numberOfTerminals];
+    for (int i = 0; i < n; ++i) {
+        PseudoTerminal* pty = [self terminalAtIndex:i];
+        [pty reloadBookmarks];
+    }
+}
+
 
 - (Profile *)defaultBookmark
 {
@@ -927,155 +975,33 @@ static BOOL initDone = NO;
                                              windowType:WINDOW_TYPE_NORMAL
                                                  screen:[bookmark objectForKey:KEY_SCREEN] ? [[bookmark objectForKey:KEY_SCREEN] intValue] : -1
                                                isHotkey:NO] autorelease];
-        if ([[bookmark objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-                [term hideAfterOpening];
-        }
+    if ([[bookmark objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+        [term hideAfterOpening];
+    }
     [self addInTerminals:term];
     return term;
 }
 
-// Executes an addressbook command in new window or tab
-- (id)launchBookmark:(NSDictionary *)bookmarkData
-               inTerminal:(PseudoTerminal *)theTerm
-    disableLionFullscreen:(BOOL)disableLionFullscreen
-{
-    PseudoTerminal *term;
-    NSDictionary *aDict;
-
-    aDict = bookmarkData;
-    if (aDict == nil) {
-        aDict = [self defaultBookmark];
-    }
-
-    if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
-        theTerm = nil;
-    }
-    // Where do we execute this command?
-    BOOL toggle = NO;
-    if (theTerm == nil) {
-        [iTermController switchToSpaceInBookmark:aDict];
-        int windowType = [self _windowTypeForBookmark:aDict];
-        if (windowType == WINDOW_TYPE_LION_FULL_SCREEN && disableLionFullscreen) {
-            windowType = WINDOW_TYPE_FULL_SCREEN;
-        }
-        if (windowType == WINDOW_TYPE_FULL_SCREEN && disableLionFullscreen) {
-            // This is a shortcut to make fullscreen hotkey windows open
-            // directly in fullscreen mode.
-            windowType = WINDOW_TYPE_FORCE_FULL_SCREEN;
-        }
-        term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
-                                                 windowType:windowType
-                                                     screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1
-                                                   isHotkey:disableLionFullscreen] autorelease];
-                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-                        [term hideAfterOpening];
-        }
-        [self addInTerminals:term];
-        if (disableLionFullscreen) {
-            // See comment above regarding hotkey windows.
-            toggle = NO;
-        } else {
-            toggle = ([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
-                     ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN);
-        }
-    } else {
-        term = theTerm;
-    }
-
-    PTYSession* session = [term addNewSession:aDict];
-    if (toggle) {
-        [term delayedEnterFullscreen];
-    }
-    // This function is activated from the dock icon's context menu so make sure
-    // that the new window is on top of all other apps' windows. For some reason,
-    // makeKeyAndOrderFront does nothing.
-    if (![[term window] isKeyWindow]) {
-        [NSApp activateIgnoringOtherApps:YES];
-        [[term window] makeKeyAndOrderFront:nil];
-        [NSApp arrangeInFront:self];
-    }
-
-    return session;
-}
-
 - (id)launchBookmark:(NSDictionary *)bookmarkData inTerminal:(PseudoTerminal *)theTerm
 {
-    return [self launchBookmark:bookmarkData inTerminal:theTerm disableLionFullscreen:NO];
+    return [self launchBookmark:bookmarkData
+                     inTerminal:theTerm
+                        withURL:nil
+                       isHotkey:NO
+                        makeKey:YES];
 }
 
-// I don't think this function is ever called.
-- (id)launchBookmark:(NSDictionary *)bookmarkData
-          inTerminal:(PseudoTerminal *)theTerm
-         withCommand:(NSString *)command
+- (NSDictionary *)profile:(NSDictionary *)aDict
+        modifiedToOpenURL:(NSString *)url
+            forObjectType:(iTermObjectType)objectType
 {
-    PseudoTerminal *term;
-    NSDictionary *aDict;
-
-    aDict = bookmarkData;
-    if (aDict == nil) {
-        aDict = [[ProfileModel sharedInstance] defaultBookmark];
-        if (!aDict) {
-            NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
-            [ITAddressBookMgr setDefaultsInBookmark:temp];
-            [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
-            aDict = temp;
-        }
-    }
-
-    if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
-        theTerm = nil;
-    }
-
-    // Where do we execute this command?
-    BOOL toggle = NO;
-    if (theTerm == nil) {
-        [iTermController switchToSpaceInBookmark:aDict];
-        term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
-                                                 windowType:[self _windowTypeForBookmark:aDict]
-                                                     screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
-                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-                        [term hideAfterOpening];
-                }
-        [self addInTerminals:term];
-        toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
-                  ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
-    } else {
-        term = theTerm;
-    }
-
-    id result = [term addNewSession:aDict
-                        withCommand:command
-                      forObjectType:theTerm ? iTermTabObject : iTermWindowObject];
-    if (toggle) {
-        [term delayedEnterFullscreen];
-    }
-    return result;
-}
-
-- (id)launchBookmark:(NSDictionary *)bookmarkData
-          inTerminal:(PseudoTerminal *)theTerm
-             withURL:(NSString *)url
-       forObjectType:(iTermObjectType)objectType
-{
-    PseudoTerminal *term;
-    NSDictionary *aDict;
-
-    aDict = bookmarkData;
-    // Automatically fill in ssh command if command is exactly equal to $$ or it's a login shell.
-    BOOL ignore;
     if (aDict == nil ||
         [[ITAddressBookMgr bookmarkCommand:aDict
                              forObjectType:objectType] isEqualToString:@"$$"] ||
         ![[aDict objectForKey:KEY_CUSTOM_COMMAND] isEqualToString:@"Yes"]) {
         Profile* prototype = aDict;
         if (!prototype) {
-            prototype = [[ProfileModel sharedInstance] defaultBookmark];
-        }
-        if (!prototype) {
-            NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
-            [ITAddressBookMgr setDefaultsInBookmark:temp];
-            [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
-            prototype = temp;
+            prototype = [self defaultBookmark];
         }
 
         NSMutableDictionary *tempDict = [NSMutableDictionary dictionaryWithDictionary:prototype];
@@ -1119,32 +1045,94 @@ static BOOL initDone = NO;
         }
     }
 
+    return aDict;
+}
+
+- (id)launchBookmark:(NSDictionary *)bookmarkData
+          inTerminal:(PseudoTerminal *)theTerm
+             withURL:(NSString *)url
+            isHotkey:(BOOL)isHotkey
+             makeKey:(BOOL)makeKey
+{
+    PseudoTerminal *term;
+    NSDictionary *aDict;
+    const iTermObjectType objectType = theTerm ? iTermTabObject : iTermWindowObject;
+
+    aDict = bookmarkData;
+    if (aDict == nil) {
+        aDict = [self defaultBookmark];
+    }
+
+    if (url) {
+        // Automatically fill in ssh command if command is exactly equal to $$ or it's a login shell.
+        aDict = [self profile:aDict modifiedToOpenURL:url forObjectType:objectType];
+    }
     if (theTerm && [[aDict objectForKey:KEY_PREVENT_TAB] boolValue]) {
         theTerm = nil;
     }
 
     // Where do we execute this command?
     BOOL toggle = NO;
-    if (theTerm == nil) {
+    if (theTerm == nil || ![theTerm windowInited]) {
         [iTermController switchToSpaceInBookmark:aDict];
-        term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
-                                                 windowType:[self _windowTypeForBookmark:aDict]
-                                                     screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
-                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-                        [term hideAfterOpening];
-                }
+        int windowType = [self windowTypeForBookmark:aDict];
+        if (isHotkey) {
+            if (windowType == WINDOW_TYPE_LION_FULL_SCREEN) {
+                windowType = WINDOW_TYPE_FULL_SCREEN;
+            }
+            if (windowType == WINDOW_TYPE_FULL_SCREEN) {
+                // This is a shortcut to make fullscreen hotkey windows open
+                // directly in fullscreen mode.
+                windowType = WINDOW_TYPE_FORCE_FULL_SCREEN;
+            }
+        }
+        if (theTerm) {
+            term = theTerm;
+            [term finishInitializationWithSmartLayout:YES
+                                           windowType:windowType
+                                               screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1
+                                             isHotkey:isHotkey];
+        } else {
+            term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
+                                                     windowType:windowType
+                                                         screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1
+                                                       isHotkey:isHotkey] autorelease];
+        }
+        if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+            [term hideAfterOpening];
+        }
         [self addInTerminals:term];
-        toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
-                  ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
+        if (isHotkey) {
+            // See comment above regarding hotkey windows.
+            toggle = NO;
+        } else {
+            toggle = ([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
+                     ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN);
+        }
     } else {
         term = theTerm;
     }
 
-    id result = [term addNewSession:aDict withURL:url forObjectType:objectType];
+    PTYSession* session;
+
+    if (url) {
+        session = [term addNewSession:aDict withURL:url forObjectType:objectType];
+    } else {
+        session = [term addNewSession:aDict];
+    }
     if (toggle) {
         [term delayedEnterFullscreen];
     }
-    return result;
+    if (makeKey && ![[term window] isKeyWindow]) {
+        // When this function is activated from the dock icon's context menu so make sure
+        // that the new window is on top of all other apps' windows. For some reason,
+        // makeKeyAndOrderFront does nothing.
+        [NSApp activateIgnoringOtherApps:YES];
+        [[term window] makeKeyAndOrderFront:nil];
+        [NSApp arrangeInFront:self];
+    }
+
+    return session;
 }
 
 - (void)launchScript:(id)sender
@@ -1214,811 +1202,42 @@ static BOOL initDone = NO;
     return nil;
 }
 
-#pragma mark hotkey window
-
-- (void)storePreviouslyActiveApp
-{
-    if (IsLeopard()) {
-        // Visor has a 10.5 path, but it is very hacky and apparently has a crash. 10.5 is moribund
-        // so I'm going to omit it.
-        return;
-    } else {
-        // 10.6+ path
-        NSDictionary *activeAppDict = [[NSWorkspace sharedWorkspace] activeApplication];
-        [previouslyActiveAppPID_ release];
-        previouslyActiveAppPID_ = nil;
-        if (![[activeAppDict objectForKey:@"NSApplicationBundleIdentifier"] isEqualToString:@"com.googlecode.iterm2"]) {
-            previouslyActiveAppPID_ = [[activeAppDict objectForKey:@"NSApplicationProcessIdentifier"] copy];
-        }
-    }
-}
-
-- (void)restorePreviouslyActiveApp
-{
-    if (IsLeopard()) {
-        // See note in storePreviouslyActiveApp.
-        return;
-    } else {
-        // 10.6+ path
-        if (!previouslyActiveAppPID_) {
-            return;
-        }
-
-        id app;
-        // NSInvocation hackery because we need to build against the 10.5 sdk and call a
-        // 10.6 function.
-
-        // app = [runningApplicationClass_ runningApplicationWithProcessIdentifier:[previouslyActiveAppPID_ intValue]];
-        NSMethodSignature *sig = [object_getClass(runningApplicationClass_) instanceMethodSignatureForSelector:@selector(runningApplicationWithProcessIdentifier:)];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:runningApplicationClass_];
-        [inv setSelector:@selector(runningApplicationWithProcessIdentifier:)];
-        int appId = [previouslyActiveAppPID_ intValue];
-        [inv setArgument:&appId atIndex:2];
-        [inv invoke];
-        [inv getReturnValue:&app];
-
-        if (app) {
-            NSLog(@"Restore app %@", app);
-            //[app activateWithOptions:0];
-            sig = [[app class] instanceMethodSignatureForSelector:@selector(activateWithOptions:)];
-            assert(sig);
-            inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:app];
-            [inv setSelector:@selector(activateWithOptions:)];
-            int opts = 0;
-            [inv setArgument:&opts atIndex:2];
-            [inv invoke];
-        }
-        [previouslyActiveAppPID_ release];
-        previouslyActiveAppPID_ = nil;
-    }
-}
-
-static PseudoTerminal* GetHotkeyWindow()
-{
-    iTermController* cont = [iTermController sharedInstance];
-    NSArray* terminals = [cont terminals];
-    for (PseudoTerminal* term in terminals) {
-        if ([term isHotKeyWindow]) {
-            return term;
-        }
-    }
-    return nil;
-}
-
-- (PseudoTerminal*)hotKeyWindow
-{
-    return GetHotkeyWindow();
-}
-
-static void RollInHotkeyTerm(PseudoTerminal* term)
-{
-    HKWLog(@"Roll in [show] visor");
-    NSScreen* screen = [term screen];
-    if (!screen) {
-        screen = [NSScreen mainScreen];
-    }
-    NSRect screenFrame = [screen visibleFrame];
-
-    NSRect rect = [[term window] frame];
-    [NSApp activateIgnoringOtherApps:YES];
-    [[term window] setFrame:rect display:YES];
-    [[term window] makeKeyAndOrderFront:nil];
-    switch ([term windowType]) {
-        case WINDOW_TYPE_NORMAL:
-            rect.origin.x = -rect.size.width;
-            rect.origin.y = -rect.size.height;
-            [[term window] setFrame:rect display:NO];
-
-            rect.origin.x = screenFrame.origin.x + (screenFrame.size.width - rect.size.width) / 2;
-            rect.origin.y = screenFrame.origin.y + (screenFrame.size.height - rect.size.height) / 2;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:1];
-            break;
-
-        case WINDOW_TYPE_TOP:
-            rect.origin.y = screenFrame.origin.y + screenFrame.size.height - rect.size.height;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:1];
-            break;
-
-        case WINDOW_TYPE_BOTTOM:
-            rect.origin.y = screenFrame.origin.y;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:1];
-            break;
-
-        case WINDOW_TYPE_LEFT:
-            rect.origin.x = screenFrame.origin.x;
-            rect.origin.y = screenFrame.origin.y;
-
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:1];
-            break;
-
-        case WINDOW_TYPE_RIGHT:
-            rect.origin.x = screenFrame.origin.x + screenFrame.size.width - rect.size.width;
-            rect.origin.y = screenFrame.origin.y;
-
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:1];
-            break;
-
-        case WINDOW_TYPE_LION_FULL_SCREEN:  // Shouldn't happen
-        case WINDOW_TYPE_FULL_SCREEN:
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setAlphaValue:1];
-            [[term window] makeKeyAndOrderFront:nil];
-            // This prevents the findbar, when hidden, from taking focus (bug 1490)
-            [[term currentSession] takeFocus];
-            [term hideMenuBar];
-            break;
-    }
-    [[iTermController sharedInstance] performSelector:@selector(rollInFinished)
-                                           withObject:nil
-                                           afterDelay:[[NSAnimationContext currentContext] duration]];
-}
-
-- (void)rollInFinished
-{
-    rollingIn_ = NO;
-    PseudoTerminal* term = GetHotkeyWindow();
-    [[term window] makeKeyAndOrderFront:nil];
-    [[term window] makeFirstResponder:[[term currentSession] TEXTVIEW]];
-}
-
-// http://www.cocoadev.com/index.pl?DeterminingOSVersion
-+ (BOOL)getSystemVersionMajor:(unsigned *)major
-                        minor:(unsigned *)minor
-                       bugFix:(unsigned *)bugFix;
-{
-    OSErr err;
-    SInt32 systemVersion, versionMajor, versionMinor, versionBugFix;
-    if ((err = Gestalt(gestaltSystemVersion, &systemVersion)) != noErr) {
+// http://cocoadev.com/DeterminingOSVersion
++ (BOOL)getSystemVersionMajor:(unsigned int *)major
+                        minor:(unsigned int *)minor
+                       bugFix:(unsigned int *)bugFix {
+    NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile:@"/System/Library/CoreServices/SystemVersion.plist"];
+    NSString *productVersion = [version objectForKey:@"ProductVersion"];
+    DLog(@"product version is %@", productVersion);
+    NSArray *parts = [productVersion componentsSeparatedByString:@"."];
+    if (parts.count == 0) {
         return NO;
     }
-    if (systemVersion < 0x1040) {
-        if (major) {
-            *major = ((systemVersion & 0xF000) >> 12) * 10 + ((systemVersion & 0x0F00) >> 8);
-        }
-        if (minor) {
-            *minor = (systemVersion & 0x00F0) >> 4;
-        }
-        if (bugFix) {
-            *bugFix = (systemVersion & 0x000F);
-        }
-    } else {
-        if ((err = Gestalt(gestaltSystemVersionMajor, &versionMajor)) != noErr) {
+    if (major) {
+        *major = [[parts objectAtIndex:0] intValue];
+        if (*major < 10) {
             return NO;
         }
-        if ((err = Gestalt(gestaltSystemVersionMinor, &versionMinor)) != noErr) {
-            return NO;
-        }
-        if ((err = Gestalt(gestaltSystemVersionBugFix, &versionBugFix)) != noErr) {
-            return NO;
-        }
-        if (major) {
-            *major = versionMajor;
-        }
-        if (minor) {
-            *minor = versionMinor;
-        }
-        if (bugFix) {
-            *bugFix = versionBugFix;
+    }
+    if (minor) {
+        *minor = 0;
+        if (parts.count > 1) {
+            *minor = [[parts objectAtIndex:1] intValue];
         }
     }
-
-    return YES;
-}
-
-static BOOL OpenHotkeyWindow()
-{
-    HKWLog(@"Open visor");
-    iTermController* cont = [iTermController sharedInstance];
-    Profile* bookmark = [[PreferencePanel sharedInstance] hotkeyBookmark];
-    if (bookmark) {
-        if ([[bookmark objectForKey:KEY_WINDOW_TYPE] intValue] == WINDOW_TYPE_LION_FULL_SCREEN) {
-            // Lion fullscreen doesn't make sense with hotkey windows. Change
-            // window type to traditional fullscreen.
-            NSMutableDictionary* replacement = [NSMutableDictionary dictionaryWithDictionary:bookmark];
-            [replacement setObject:[NSNumber numberWithInt:WINDOW_TYPE_FULL_SCREEN]
-                            forKey:KEY_WINDOW_TYPE];
-            bookmark = replacement;
-        }
-        PTYSession* session = [cont launchBookmark:bookmark inTerminal:nil disableLionFullscreen:YES];
-        PseudoTerminal* term = [[session tab] realParentWindow];
-        [term setIsHotKeyWindow:YES];
-
-        if ([term windowType] == WINDOW_TYPE_FULL_SCREEN) {
-            [[term window] setAlphaValue:0];
-        } else {
-            // place it above the screen so it can be rolled in.
-            NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-            NSRect rect = [[term window] frame];
-            if ([term windowType] == WINDOW_TYPE_TOP) {
-                rect.origin.y = screenFrame.origin.y + screenFrame.size.height + rect.size.height;
-            } else if ([term windowType] == WINDOW_TYPE_BOTTOM) {
-                 rect.origin.y = screenFrame.origin.y - rect.size.height;
-            } else if ([term windowType] == WINDOW_TYPE_LEFT) {
-              rect.origin.x = screenFrame.origin.x - rect.size.width;
-            } else {
-                rect.origin.y = -rect.size.height;
-                rect.origin.x = -rect.size.width;
-            }
-            if (IsSnowLeopardOrLater() && !IsLionOrLater()) {
-                // TODO: When upgrading to the 10.6 SDK, remove the conditional and the
-                // const below:
-                [[term window] setCollectionBehavior:[[term window] collectionBehavior] | FutureNSWindowCollectionBehaviorStationary];
-            }
-            if (IsLionOrLater()) {
-                [[term window] setCollectionBehavior:[[term window] collectionBehavior] & ~NSWindowCollectionBehaviorFullScreenPrimary];
-            }
-        }
-        RollInHotkeyTerm(term);
-        return YES;
-    }
-    return NO;
-}
-
-- (void)showNonHotKeyWindowsAndSetAlphaTo:(float)a
-{
-    PseudoTerminal* hotkeyTerm = GetHotkeyWindow();
-    for (PseudoTerminal* term in [[iTermController sharedInstance] terminals]) {
-        [[term window] setAlphaValue:a];
-        if (term != hotkeyTerm) {
-            [[term window] makeKeyAndOrderFront:nil];
-        }
-    }
-    // Unhide all windows and bring the one that was at the top to the front.
-    int i = [[iTermController sharedInstance] keyWindowIndexMemo];
-    if (i >= 0 && i < [[[iTermController sharedInstance] terminals] count]) {
-        [[[[[iTermController sharedInstance] terminals] objectAtIndex:i] window] makeKeyAndOrderFront:nil];
-    }
-}
-
-- (BOOL)rollingInHotkeyTerm
-{
-    return rollingIn_;
-}
-
-static void RollOutHotkeyTerm(PseudoTerminal* term, BOOL itermWasActiveWhenHotkeyOpened)
-{
-    HKWLog(@"Roll out [hide] visor");
-    if (![[term window] isVisible]) {
-        HKWLog(@"RollOutHotkeyTerm returning because term isn't visible.");
-        return;
-    }
-    BOOL temp = [term isHotKeyWindow];
-    NSRect screenFrame = [[NSScreen mainScreen] frame];
-    NSRect rect = [[term window] frame];
-    switch ([term windowType]) {
-        case WINDOW_TYPE_NORMAL:
-            rect.origin.x = -rect.size.width;
-            rect.origin.y = -rect.size.height;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-
-        case WINDOW_TYPE_TOP:
-            rect.origin.y = screenFrame.size.height;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-
-        case WINDOW_TYPE_BOTTOM:
-            rect.origin.y = screenFrame.origin.y - rect.size.height;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-
-        case WINDOW_TYPE_LEFT:
-            rect.origin.x = -rect.size.width;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-
-        case WINDOW_TYPE_RIGHT:
-            rect.origin.x = screenFrame.origin.x + screenFrame.size.width;
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setFrame:rect display:YES];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-
-        case WINDOW_TYPE_LION_FULL_SCREEN:  // Shouldn't happen
-        case WINDOW_TYPE_FULL_SCREEN:
-            [[NSAnimationContext currentContext] setDuration:[[PreferencePanel sharedInstance] hotkeyTermAnimationDuration]];
-            [[[term window] animator] setAlphaValue:0];
-            break;
-    }
-
-    [[iTermController sharedInstance] performSelector:@selector(restoreNormalcy:)
-                                           withObject:term
-                                           afterDelay:[[NSAnimationContext currentContext] duration]];
-    [term setIsHotKeyWindow:temp];
-}
-
-- (void)doNotOrderOutWhenHidingHotkeyWindow
-{
-    itermWasActiveWhenHotkeyOpened = YES;
-}
-
-- (void)restoreNormalcy:(PseudoTerminal*)term
-{
-    if (!itermWasActiveWhenHotkeyOpened) {
-        [NSApp hide:nil];
-        [self performSelector:@selector(unhide) withObject:nil afterDelay:0.1];
-    } else {
-        PseudoTerminal* currentTerm = [self currentTerminal];
-        if (currentTerm && ![currentTerm isHotKeyWindow] && [currentTerm fullScreen]) {
-            [currentTerm hideMenuBar];
-        } else {
-            [currentTerm showMenuBar];
-        }
-    }
-
-    if ([[PreferencePanel sharedInstance] closingHotkeySwitchesSpaces]) {
-        [[term window] orderOut:self];
-    } else {
-        // Place behind all other windows at this level
-        [[term window] orderWindow:NSWindowBelow relativeTo:0];
-        // If you orderOut the hotkey term (term variable) then it switches to the
-        // space in which your next window exists. So leave key status in the hotkey
-        // window although it's invisible.
-    }
-}
-
-- (void)unhide
-{
-    [NSApp unhideWithoutActivation];
-    for (PseudoTerminal* t in [[iTermController sharedInstance] terminals]) {
-        if (![t isHotKeyWindow]) {
-            [[[t window] animator] setAlphaValue:1];
-        }
-    }
-}
-
-- (void)showHotKeyWindow
-{
-    [self storePreviouslyActiveApp];
-    itermWasActiveWhenHotkeyOpened = [NSApp isActive];
-    PseudoTerminal* hotkeyTerm = GetHotkeyWindow();
-    if (hotkeyTerm) {
-        HKWLog(@"Showing existing visor");
-        int i = 0;
-        [[iTermController sharedInstance] setKeyWindowIndexMemo:-1];
-        for (PseudoTerminal* term in [[iTermController sharedInstance] terminals]) {
-            if ([NSApp isActive]) {
-                if (term != hotkeyTerm && [[term window] isKeyWindow]) {
-                    [[iTermController sharedInstance] setKeyWindowIndexMemo:i];
-                }
-            }
-            i++;
-        }
-        HKWLog(@"Activate iterm2");
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-        rollingIn_ = YES;
-        RollInHotkeyTerm(hotkeyTerm);
-    } else {
-        HKWLog(@"Open new visor window");
-        if (OpenHotkeyWindow()) {
-            rollingIn_ = YES;
-        }
-    }
-}
-
-- (BOOL)isHotKeyWindowOpen
-{
-    PseudoTerminal* term = GetHotkeyWindow();
-    return term && [[term window] isVisible];
-}
-
-- (BOOL)_isAnyNontHotKeyWindowVisible
-{
-    PseudoTerminal* hotkeyTerm = GetHotkeyWindow();
-    BOOL isAnyNonHotWindowVisible = NO;
-    for (PseudoTerminal* term in [[iTermController sharedInstance] terminals]) {
-        if (term != hotkeyTerm) {
-            if ([[term window] isVisible]) {
-                HKWLog(@"found visible non-visor window");
-                isAnyNonHotWindowVisible = YES;
-                break;
-            }
-        }
-    }
-    return isAnyNonHotWindowVisible;
-}
-
-- (void)fastHideHotKeyWindow
-{
-    HKWLog(@"fastHideHotKeyWindow");
-    PseudoTerminal* term = GetHotkeyWindow();
-    if (term) {
-        HKWLog(@"fastHideHotKeyWindow - found a hot term");
-        // Temporarily tell the hotkeywindow that it's not hot so that it doesn't try to hide itself
-        // when losing key status.
-        BOOL temp = [term isHotKeyWindow];
-        [term setIsHotKeyWindow:NO];
-
-        // Immediately hide the hotkey window.
-        [[term window] orderOut:nil];
-
-        // Move the hotkey window to its offscreen location or its natural alpha value.
-        NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-        NSRect rect = [[term window] frame];
-        switch ([term windowType]) {
-            case WINDOW_TYPE_NORMAL:
-                rect.origin.x = -rect.size.width;
-                rect.origin.y = -rect.size.height;
-                [[term window] setFrame:rect display:YES];
-                break;
-
-            case WINDOW_TYPE_TOP:
-                // Note that this rect is different than in RollOutHotkeyTerm(). For some reason,
-                // in this code path, the screen's origin is not included. I don't know why.
-                rect.origin.y = screenFrame.size.height + screenFrame.origin.y;
-                HKWLog(@"FAST: Set y=%f", rect.origin.y);
-                [[term window] setFrame:rect display:YES];
-                break;
-            case WINDOW_TYPE_BOTTOM:
-                rect.origin.y = screenFrame.origin.y - rect.size.height;
-                HKWLog(@"FAST: Set y=%f", rect.origin.y);
-                [[term window] setFrame:rect display:YES];
-                break;
-
-            case WINDOW_TYPE_LEFT:
-                rect.origin.x = screenFrame.origin.x - rect.size.width;
-                HKWLog(@"FAST: Set y=%f", rect.origin.y);
-                [[term window] setFrame:rect display:YES];
-                break;
-
-            case WINDOW_TYPE_RIGHT:
-                rect.origin.x = screenFrame.origin.x + screenFrame.size.width;
-                HKWLog(@"FAST: Set y=%f", rect.origin.y);
-                [[term window] setFrame:rect display:YES];
-                break;
-
-            case WINDOW_TYPE_LION_FULL_SCREEN:  // Shouldn't happen.
-            case WINDOW_TYPE_FULL_SCREEN:
-                [[term window] setAlphaValue:0];
-                break;
-        }
-
-        // Immediately show all other windows.
-        [self showNonHotKeyWindowsAndSetAlphaTo:1];
-
-        // Restore hotkey window's status.
-        [term setIsHotKeyWindow:temp];
-    }
-}
-
-- (void)hideHotKeyWindow:(PseudoTerminal*)hotkeyTerm
-{
-    HKWLog(@"Hide visor.");
-    if ([[hotkeyTerm window] isVisible]) {
-        HKWLog(@"key window is %@", [NSApp keyWindow]);
-        NSWindow *theKeyWindow = [NSApp keyWindow];
-        if (!theKeyWindow ||
-            ([theKeyWindow isKindOfClass:[PTYWindow class]] &&
-             [(PseudoTerminal*)[theKeyWindow windowController] isHotKeyWindow])) {
-            [self restorePreviouslyActiveApp];
-        }
-    }
-    RollOutHotkeyTerm(hotkeyTerm, itermWasActiveWhenHotkeyOpened);
-}
-
-void OnHotKeyEvent(void)
-{
-    HKWLog(@"hotkey pressed");
-    PreferencePanel* prefPanel = [PreferencePanel sharedInstance];
-    if ([prefPanel hotkeyTogglesWindow]) {
-        HKWLog(@"visor enabled");
-        PseudoTerminal* hotkeyTerm = GetHotkeyWindow();
-        if (hotkeyTerm) {
-            HKWLog(@"already have a visor created");
-            if ([[hotkeyTerm window] alphaValue] == 1) {
-                HKWLog(@"visor opaque");
-                [[iTermController sharedInstance] hideHotKeyWindow:hotkeyTerm];
-            } else {
-                HKWLog(@"visor not opaque");
-                [[iTermController sharedInstance] showHotKeyWindow];
-            }
-        } else {
-            HKWLog(@"no visor created yet");
-            [[iTermController sharedInstance] showHotKeyWindow];
-        }
-    } else if ([NSApp isActive]) {
-        NSWindow* prefWindow = [prefPanel window];
-        NSWindow* appKeyWindow = [[NSApplication sharedApplication] keyWindow];
-        if (prefWindow != appKeyWindow ||
-            ![iTermApplication isTextFieldInFocus:[prefPanel hotkeyField]]) {
-            [NSApp hide:nil];
-        }
-    } else {
-        iTermController* controller = [iTermController sharedInstance];
-        int n = [controller numberOfTerminals];
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-        if (n == 0) {
-            [controller newWindow:nil];
-        }
-    }
-}
-
-- (BOOL)eventIsHotkey:(NSEvent*)e
-{
-    const int mask = (NSCommandKeyMask | NSAlternateKeyMask | NSShiftKeyMask | NSControlKeyMask);
-    return (hotkeyCode_ &&
-            ([e modifierFlags] & mask) == (hotkeyModifiers_ & mask) &&
-            [e keyCode] == hotkeyCode_);
-}
-
-/*
- * The callback is passed a proxy for the tap, the event type, the incoming event,
- * and the refcon the callback was registered with.
- * The function should return the (possibly modified) passed in event,
- * a newly constructed event, or NULL if the event is to be deleted.
- *
- * The CGEventRef passed into the callback is retained by the calling code, and is
- * released after the callback returns and the data is passed back to the event
- * system.  If a different event is returned by the callback function, then that
- * event will be released by the calling code along with the original event, after
- * the event data has been passed back to the event system.
- */
-static CGEventRef OnTappedEvent(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
-{
-    iTermController* cont = refcon;
-    if (type == kCGEventTapDisabledByTimeout) {
-        NSLog(@"kCGEventTapDisabledByTimeout");
-        if (cont->machPortRef) {
-            NSLog(@"Re-enabling event tap");
-            CGEventTapEnable(cont->machPortRef, true);
-        }
-        return NULL;
-    } else if (type == kCGEventTapDisabledByUserInput) {
-        NSLog(@"kCGEventTapDisabledByUserInput");
-        if (cont->machPortRef) {
-            NSLog(@"Re-enabling event tap");
-            CGEventTapEnable(cont->machPortRef, true);
-        }
-        return NULL;
-    }
-
-    NSEvent* cocoaEvent = [NSEvent eventWithCGEvent:event];
-    BOOL callDirectly = NO;
-    BOOL local = NO;
-    if ([NSApp isActive]) {
-        // Remap modifier keys only while iTerm2 is active; otherwise you could just use the
-        // OS's remap feature.
-        NSString* unmodkeystr = [cocoaEvent charactersIgnoringModifiers];
-        unichar unmodunicode = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
-        unsigned int modflag = [cocoaEvent modifierFlags];
-        NSString *keyBindingText;
-        PreferencePanel* prefPanel = [PreferencePanel sharedInstance];
-        BOOL tempDisabled = [prefPanel remappingDisabledTemporarily];
-        int action = [iTermKeyBindingMgr actionForKeyCode:unmodunicode
-                                                       modifiers:modflag
-                                                            text:&keyBindingText
-                                              keyMappings:nil];
-        BOOL isDoNotRemap = (action == KEY_ACTION_DO_NOT_REMAP_MODIFIERS);
-        local = action == KEY_ACTION_REMAP_LOCALLY;
-        CGEventRef eventCopy = CGEventCreateCopy(event);
-        if (local) {
-            // The remapping should be applied and sent to [NSApp sendEvent:]
-            // and not be returned from here. Apply the remapping to a copy
-            // of the original event.
-            CGEventRef temp = event;
-            event = eventCopy;
-            eventCopy = temp;
-        }
-        BOOL keySheetOpen = [[prefPanel keySheet] isKeyWindow] && [prefPanel keySheetIsOpen];
-        if ((!tempDisabled && !isDoNotRemap) ||  // normal case, whether keysheet is open or not
-            (!tempDisabled && isDoNotRemap && keySheetOpen)) {  // about to change dnr to non-dnr
-            [iTermKeyBindingMgr remapModifiersInCGEvent:event
-                                              prefPanel:prefPanel];
-            cocoaEvent = [NSEvent eventWithCGEvent:event];
-        }
-        if (local) {
-            // Now that the cocoaEvent has the remapped version, restore
-            // the original event.
-            CGEventRef temp = event;
-            event = eventCopy;
-            eventCopy = temp;
-        }
-        CFRelease(eventCopy);
-        if (tempDisabled && !isDoNotRemap) {
-            callDirectly = YES;
-        }
-    } else {
-        // Update cocoaEvent with a remapped modifier (if it appropriate to do
-        // so). This has an effect only if the remapped key is the hotkey.
-        CGEventRef eventCopy = CGEventCreateCopy(event);
-        NSString* unmodkeystr = [cocoaEvent charactersIgnoringModifiers];
-        unichar unmodunicode = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
-        unsigned int modflag = [cocoaEvent modifierFlags];
-        NSString *keyBindingText;
-        int action = [iTermKeyBindingMgr actionForKeyCode:unmodunicode
-                                                       modifiers:modflag
-                                                            text:&keyBindingText
-                                                     keyMappings:nil];
-        BOOL isDoNotRemap = (action == KEY_ACTION_DO_NOT_REMAP_MODIFIERS) || (action == KEY_ACTION_REMAP_LOCALLY);
-        if (!isDoNotRemap) {
-            [iTermKeyBindingMgr remapModifiersInCGEvent:eventCopy
-                                              prefPanel:[PreferencePanel sharedInstance]];
-        }
-        cocoaEvent = [NSEvent eventWithCGEvent:eventCopy];
-        CFRelease(eventCopy);
-    }
-#ifdef USE_EVENT_TAP_FOR_HOTKEY
-    if ([cont eventIsHotkey:cocoaEvent]) {
-        OnHotKeyEvent();
-        return NULL;
-    }
-#endif
-
-    if (callDirectly) {
-        // Send keystroke directly to preference panel when setting do-not-remap for a key; for
-        // system keys, NSApp sendEvent: is never called so this is the last chance.
-        [[PreferencePanel sharedInstance] shortcutKeyDown:cocoaEvent];
-        return nil;
-    }
-    if (local) {
-        // Send event directly to iTerm2 and do not allow other apps to see the
-        // event at all.
-        [NSApp sendEvent:cocoaEvent];
-        return nil;
-    } else {
-        // Normal case.
-        return event;
-    }
-}
-
-- (NSEvent*)runEventTapHandler:(NSEvent*)event
-{
-    CGEventRef newEvent = OnTappedEvent(nil, kCGEventKeyDown, [event CGEvent], self);
-    if (newEvent) {
-        return [NSEvent eventWithCGEvent:newEvent];
-    } else {
-        return nil;
-    }
-}
-
-- (void)unregisterHotkey
-{
-    hotkeyCode_ = 0;
-    hotkeyModifiers_ = 0;
-#ifndef USE_EVENT_TAP_FOR_HOTKEY
-    [[GTMCarbonEventDispatcherHandler sharedEventDispatcherHandler] unregisterHotKey:carbonHotKey_];
-    [carbonHotKey_ release];
-    carbonHotKey_ = nil;
-#endif
-}
-
-- (BOOL)haveEventTap
-{
-    return machPortRef != 0;
-}
-
-- (void)stopEventTap
-{
-    if ([self haveEventTap]) {
-        CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
-                              eventSrc,
-                              kCFRunLoopCommonModes);
-        CFMachPortInvalidate(machPortRef); // switches off the event tap;
-        CFRelease(machPortRef);
-    }
-}
-
-- (BOOL)startEventTap
-{
-#ifdef FAKE_EVENT_TAP
-    return YES;
-#endif
-
-    if (![self haveEventTap]) {
-        DebugLog(@"Register event tap.");
-        machPortRef = CGEventTapCreate(kCGHIDEventTap,
-                                       kCGTailAppendEventTap,
-                                       kCGEventTapOptionDefault,
-                                       CGEventMaskBit(kCGEventKeyDown),
-                                       (CGEventTapCallBack)OnTappedEvent,
-                                       self);
-        if (machPortRef) {
-            eventSrc = CFMachPortCreateRunLoopSource(NULL, machPortRef, 0);
-            if (eventSrc == NULL) {
-                DebugLog(@"CFMachPortCreateRunLoopSource failed.");
-                NSLog(@"CFMachPortCreateRunLoopSource failed.");
-                CFRelease(machPortRef);
-                machPortRef = 0;
-                return NO;
-            } else {
-                DebugLog(@"Adding run loop source.");
-                // Get the CFRunLoop primitive for the Carbon Main Event Loop, and add the new event souce
-                CFRunLoopAddSource(CFRunLoopGetCurrent(),
-                                   eventSrc,
-                                   kCFRunLoopCommonModes);
-                CFRelease(eventSrc);
-            }
-            return YES;
-        } else {
-            return NO;
-        }
-    } else {
-        return YES;
-    }
-}
-
-- (BOOL)registerHotkey:(int)keyCode modifiers:(int)modifiers
-{
-    if (carbonHotKey_) {
-        [self unregisterHotkey];
-    }
-    hotkeyCode_ = keyCode;
-    hotkeyModifiers_ = modifiers & (NSCommandKeyMask | NSControlKeyMask | NSAlternateKeyMask | NSShiftKeyMask);
-#ifdef USE_EVENT_TAP_FOR_HOTKEY
-    if (![self startEventTap]) {
-        switch (NSRunAlertPanel(@"Could not enable hotkey",
-                                @"You have assigned a \"hotkey\" that opens iTerm2 at any time. To use it, you must turn on \"access for assistive devices\" in the Universal Access preferences panel in System Preferences and restart iTerm2.",
-                                @"OK",
-                                @"Open System Preferences",
-                                @"Disable Hotkey",
-                                nil)) {
-            case NSAlertOtherReturn:
-                [[PreferencePanel sharedInstance] disableHotkey];
-                break;
-
-            case NSAlertAlternateReturn:
-                [[NSWorkspace sharedWorkspace] openFile:@"/System/Library/PreferencePanes/UniversalAccessPref.prefPane"];
-                return NO;
+    if (bugFix) {
+        *bugFix = 0;
+        if (parts.count > 2) {
+            *bugFix = [[parts objectAtIndex:2] intValue];
         }
     }
     return YES;
-#else
-    carbonHotKey_ = [[[GTMCarbonEventDispatcherHandler sharedEventDispatcherHandler]
-                      registerHotKey:keyCode
-                      modifiers:hotkeyModifiers_
-                      target:self
-                      action:@selector(carbonHotkeyPressed)
-                      userInfo:nil
-                      whenPressed:YES] retain];
-    return YES;
-#endif
-}
-
-- (void)carbonHotkeyPressed
-{
-    OnHotKeyEvent();
-}
-
-- (void)beginRemappingModifiers
-{
-    if (![self startEventTap]) {
-        switch (NSRunAlertPanel(@"Could not remap modifiers",
-                                @"You have chosen to remap certain modifier keys. For this to work for all key combinations (such as cmd-tab), you must turn on \"access for assistive devices\" in the Universal Access preferences panel in System Preferences and restart iTerm2.",
-                                @"OK",
-                                @"Open System Preferences",
-                                nil,
-                                nil)) {
-            case NSAlertAlternateReturn:
-                [[NSWorkspace sharedWorkspace] openFile:@"/System/Library/PreferencePanes/UniversalAccessPref.prefPane"];
-                break;
-        }
-    }
 }
 
 - (void)dumpViewHierarchy {
     for (PseudoTerminal *term in [self terminals]) {
         DebugLog([NSString stringWithFormat:@"Terminal %@ at %@", [term window], [NSValue valueWithRect:[[term window] frame]]]);
-        DebugLog([[[term window] contentView] hierarchicalDescription]);
+        DebugLog([[[term window] contentView] iterm_recursiveDescription]);
     }
 }
 
@@ -2058,7 +1277,7 @@ NSString *terminalsKey = @"terminals";
     return ([terminalWindows objectAtIndex:theIndex]);
 }
 
-- (void)setCurrentTerminal:(PseudoTerminal*)thePseudoTerminal
+- (void)setCurrentTerminal:(PseudoTerminal *)thePseudoTerminal
 {
     FRONT = thePseudoTerminal;
 
@@ -2106,7 +1325,7 @@ NSString *terminalsKey = @"terminals";
 
     [terminalWindows insertObject:object atIndex:theIndex];
     [self updateWindowTitles];
-    assert([object isInitialized]);
+//    assert([object isInitialized]);
 }
 
 - (void)removeFromTerminalsAtIndex:(unsigned)theIndex

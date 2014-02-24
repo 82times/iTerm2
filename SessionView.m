@@ -1,42 +1,16 @@
-// -*- mode:objc -*-
-/*
- **  SessionView.m
- **
- **  Copyright (c) 2010
- **
- **  Author: George Nachman
- **
- **  Project: iTerm2
- **
- **  Description: This view contains a session's scrollview.
- **
- **  This program is free software; you can redistribute it and/or modify
- **  it under the terms of the GNU General Public License as published by
- **  the Free Software Foundation; either version 2 of the License, or
- **  (at your option) any later version.
- **
- **  This program is distributed in the hope that it will be useful,
- **  but WITHOUT ANY WARRANTY; without even the implied warranty of
- **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- **  GNU General Public License for more details.
- **
- **  You should have received a copy of the GNU General Public License
- **  along with this program; if not, write to the Free Software
- **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
+// This view contains a session's scrollview.
 
 #import "SessionView.h"
+#import "DebugLogging.h"
+#import "FutureMethods.h"
+#import "MovePaneController.h"
+#import "PSMTabDragAssistant.h"
+#import "PTYScrollView.h"
 #import "PTYSession.h"
 #import "PTYTab.h"
 #import "PTYTextView.h"
-#import "PseudoTerminal.h"
-#import "SplitSelectionView.h"
-#import "MovePaneController.h"
-#import "PSMTabDragAssistant.h"
 #import "SessionTitleView.h"
-#import "iTermApplicationDelegate.h"  // For DLog
-#import "FutureMethods.h"
-#import "PTYScrollView.h"
+#import "SplitSelectionView.h"
 
 static const float kTargetFrameRate = 1.0/60.0;
 static int nextViewId;
@@ -292,17 +266,12 @@ static NSDate* lastResizeDate_;
     // in any subview!
     NSPoint p = [NSEvent mouseLocation];
     NSPoint pointInSessionView;
-    if (IsLionOrLater()) {
-        NSRect windowRect = [self futureConvertRectFromScreen:NSMakeRect(p.x, p.y, 0, 0)];
-        pointInSessionView = [self convertRect:windowRect fromView:nil].origin;
-        DLog(@"Point in screen coords=%@, point in window coords=%@, point in session view=%@",
-             NSStringFromPoint(p),
-             NSStringFromPoint(windowRect.origin),
-             NSStringFromPoint(pointInSessionView));
-    } else {
-        NSPoint basePoint = [[self window] convertScreenToBase:p];
-        pointInSessionView = [self convertPointFromBase:basePoint];
-    }
+    NSRect windowRect = [self.window convertRectFromScreen:NSMakeRect(p.x, p.y, 0, 0)];
+    pointInSessionView = [self convertRect:windowRect fromView:nil].origin;
+    DLog(@"Point in screen coords=%@, point in window coords=%@, point in session view=%@",
+         NSStringFromPoint(p),
+         NSStringFromPoint(windowRect.origin),
+         NSStringFromPoint(pointInSessionView));
     if (title_ && NSPointInRect(pointInSessionView, [title_ frame])) {
         [title_ mouseDown:event];
         --inme;
@@ -408,20 +377,24 @@ static NSDate* lastResizeDate_;
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-        // Fill in background color in the area around a scrollview if it's smaller
-        // than the session view.
-        [super drawRect:dirtyRect];
-        NSColor *bgColor = [[session_ TEXTVIEW] defaultBGColor];
-        [bgColor set];
+    // Fill in background color in the area around a scrollview if it's smaller
+    // than the session view.
+    [super drawRect:dirtyRect];
+    NSColor *bgColor = [[session_ TEXTVIEW] defaultBGColor];
+    [bgColor set];
     PTYScrollView *scrollView = [session_ SCROLLVIEW];
-        NSRect svFrame = [scrollView frame];
-        if (svFrame.size.width < self.frame.size.width) {
-                double widthDiff = self.frame.size.width - svFrame.size.width;
-                NSRectFill(NSMakeRect(self.frame.size.width - widthDiff, 0, widthDiff, self.frame.size.height));
-        }
-        if (svFrame.origin.y != 0) {
-                NSRectFill(NSMakeRect(0, 0, self.frame.size.width, svFrame.origin.y));
-        }
+    NSRect svFrame = [scrollView frame];
+    if (svFrame.size.width < self.frame.size.width) {
+        double widthDiff = self.frame.size.width - svFrame.size.width;
+        NSRectFill(NSMakeRect(self.frame.size.width - widthDiff, 0, widthDiff, self.frame.size.height));
+    }
+    if (svFrame.origin.y != 0) {
+        NSRectFill(NSMakeRect(0, 0, self.frame.size.width, svFrame.origin.y));
+    }
+    CGFloat maxY = svFrame.origin.y + svFrame.size.height;
+    if (maxY < self.frame.size.height) {
+        NSRectFill(NSMakeRect(dirtyRect.origin.x, maxY, dirtyRect.size.width, self.frame.size.height - maxY));
+    }
 }
 
 #pragma mark NSDraggingSource protocol
@@ -567,6 +540,7 @@ static NSDate* lastResizeDate_;
         [self updateTitleFrame];
     }
     [self setTitle:[session_ name]];
+    [self updateScrollViewFrame];
     return YES;
 }
 
@@ -594,8 +568,10 @@ static NSDate* lastResizeDate_;
 - (NSSize)maximumPossibleScrollViewContentSize
 {
     NSSize size = self.frame.size;
+    DLog(@"maximumPossibleScrollViewContentSize. size=%@", [NSValue valueWithSize:size]);
     if (showTitle_) {
         size.height -= kTitleHeight;
+        DLog(@"maximumPossibleScrollViewContentSize: sub title height. size=%@", [NSValue valueWithSize:size]);
     }
 
     Class verticalScrollerClass = [[[session_ SCROLLVIEW] verticalScroller] class];
@@ -614,23 +590,32 @@ static NSDate* lastResizeDate_;
 
 - (void)updateTitleFrame
 {
-        NSRect aRect = [self frame];
-        NSView *scrollView = (NSView *)[session_ SCROLLVIEW];
-        if (showTitle_) {
-                [title_ setFrame:NSMakeRect(0,
-                                                                        aRect.size.height - kTitleHeight,
-                                                                        aRect.size.width,
-                                                                        kTitleHeight)];
-                [scrollView setFrameOrigin:NSMakePoint(
-                        0,
-                        aRect.size.height - scrollView.frame.size.height - kTitleHeight)];
-        } else {
-                [scrollView setFrameOrigin:NSMakePoint(
-                        0,
-                        aRect.size.height - scrollView.frame.size.height)];
-        }
-        [findView_ setFrameOrigin:NSMakePoint(aRect.size.width - [[findView_ view] frame].size.width - 30,
-                                                                                  aRect.size.height - [[findView_ view] frame].size.height)];
+    NSRect aRect = [self frame];
+    NSView *scrollView = (NSView *)[session_ SCROLLVIEW];
+    if (showTitle_) {
+        [title_ setFrame:NSMakeRect(0,
+                                    aRect.size.height - kTitleHeight,
+                                    aRect.size.width,
+                                    kTitleHeight)];
+    }
+    [self updateScrollViewFrame];
+    [findView_ setFrameOrigin:NSMakePoint(aRect.size.width - [[findView_ view] frame].size.width - 30,
+                                          aRect.size.height - [[findView_ view] frame].size.height)];
+}
+
+- (void)updateScrollViewFrame
+{
+    int lineHeight = [[session_ TEXTVIEW] lineHeight];
+    int margins = VMARGIN * 2;
+    CGFloat titleHeight = showTitle_ ? title_.frame.size.height : 0;
+    NSRect rect = NSMakeRect(0,
+                             0,
+                             self.frame.size.width,
+                             self.frame.size.height - titleHeight);
+    int rows = floor((rect.size.height - margins) / lineHeight);
+    rect.size.height = rows * lineHeight + margins;
+    rect.origin.y = self.frame.size.height - titleHeight - rect.size.height;
+    [session_ SCROLLVIEW].frame = rect;
 }
 
 - (void)setTitle:(NSString *)title
@@ -644,7 +629,8 @@ static NSDate* lastResizeDate_;
 
 - (NSString *)description
 {
-    return [NSString stringWithFormat:@"<SessionView frame:%@ size:%dx%d>", [NSValue valueWithRect:[self frame]], [session_ columns], [session_ rows]];
+    return [NSString stringWithFormat:@"<%@: %p frame:%@ size:%dx%d>", [self class], self,
+            [NSValue valueWithRect:[self frame]], [session_ columns], [session_ rows]];
 }
 
 #pragma mark SessionTitleViewDelegate

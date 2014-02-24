@@ -27,159 +27,11 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import "FindContext.h"
 #import "ScreenChar.h"
-
-// When receiving search results, you'll get an array of this class. Positions
-// can be converted to x,y coordinates with -convertPosition:withWidth:toX:toY.
-// length gives the number of screen_char_t elements matching the search (which
-// may differ from the number of code points in the search string because of
-// the vagueries of unicode, or more obviously, for regex searches).
-@interface ResultRange : NSObject {
-@public
-    int position;
-    int length;
-}
-@end
-
-@interface XYRange : NSObject {
-@public
-    int xStart;
-    int yStart;
-    int xEnd;
-    int yEnd;
-}
-@end
-
-#define FindOptCaseInsensitive (1 << 0)
-#define FindOptBackwards       (1 << 1)
-#define FindOptRegex           (1 << 2)
-#define FindMultipleResults    (1 << 3)
-typedef struct FindContext {
-    // Current absolute block number being searched.
-    int absBlockNum;
-
-    // The substring to search for.
-    NSString* substring;
-
-    // A bitwise OR of the options defined above.
-    int options;
-
-    // 1: search forward. -1: search backward.
-    int dir;
-
-    // The offset within a block to begin searching. -1 means the end of the
-    // block.
-    int offset;
-
-    // The offset within a block at which to stop searching. No results
-    // with an offset at or beyond this position will be returned.
-    int stopAt;
-
-    // Searching: a search is in progress and this context can be used to search.
-    // Matched: At least one result has been found. This context can be used to
-    //   search again.
-    // NotFound: No results were found and the end of the buffer was reached.
-    enum { Searching, Matched, NotFound } status;
-    int matchLength;
-    NSMutableArray* results;  // used for multiple results
-    BOOL hasWrapped;   // for client use. Not read or written by LineBuffer.
-} FindContext;
-
-// LineBlock represents an ordered collection of lines of text. It stores them contiguously
-// in a buffer.
-@interface LineBlock : NSObject {
-    // The raw lines, end-to-end. There is no delimiter between each line.
-    screen_char_t* raw_buffer;
-    screen_char_t* buffer_start;  // usable start of buffer (stuff before this is dropped)
-
-    int start_offset;  // distance from raw_buffer to buffer_start
-    int first_entry;  // first valid cumulative_line_length
-
-    // The number of elements allocated for raw_buffer.
-    int buffer_size;
-
-    // There will be as many entries in this array as there are lines in raw_buffer.
-    // The ith value is the length of the ith line plus the value of 
-    // cumulative_line_lengths[i-1] for i>0 or 0 for i==0.
-    int* cumulative_line_lengths;
-
-    // The number of elements allocated for cumulative_line_lengths.
-    int cll_capacity;
-
-    // The number of values in the cumulative_line_lengths array.
-    int cll_entries;
-
-    // If true, then the last raw line does not include a logical newline at its terminus.
-    BOOL is_partial;
-
-    // The number of wrapped lines if width==cached_numlines_width.
-    int cached_numlines;
-
-    // This is -1 if the cache is invalid; otherwise it specifies the width for which
-    // cached_numlines is correct.
-    int cached_numlines_width;
-}
-
-- (LineBlock*) initWithRawBufferSize: (int) size;
-- (LineBlock *)copy;
-
-- (void) dealloc;
-
-// Try to append a line to the end of the buffer. Returns false if it does not fit. If length > buffer_size it will never succeed.
-// Callers should split such lines into multiple pieces.
-- (BOOL) appendLine: (screen_char_t*) buffer length: (int) length partial: (BOOL) partial width: (int) width;
-
-// Try to get a line that is lineNum after the first line in this block after wrapping them to a given width.
-// If the line is present, return a pointer to its start and fill in *lineLength with the number of bytes in the line.
-// If the line is not present, decrement *lineNum by the number of lines in this block and return NULL.
-- (screen_char_t*) getWrappedLineWithWrapWidth: (int) width lineNum: (int*) lineNum lineLength: (int*) lineLength includesEndOfLine: (int*) includesEndOfLine;
-
-// Get the number of lines in this block at a given screen width.
-- (int) getNumLinesWithWrapWidth: (int) width;
-
-// Returns whether getNumLinesWithWrapWidth will be fast.
-- (BOOL) hasCachedNumLinesForWidth: (int) width;
-
-// Returns true if the last line is incomplete.
-- (BOOL) hasPartial;
-
-// Remove the last line. Returns false if there was none.
-- (BOOL) popLastLineInto: (screen_char_t**) ptr withLength: (int*) length upToWidth: (int) width;
-
-// Drop lines from the start of the buffer. Returns the number of lines actually dropped
-// (either n or the number of lines in the block).
-- (int) dropLines:(int)n withWidth:(int)width chars:(int *)charsDropped;
-
-// Returns true if there are no lines in the block
-- (BOOL) isEmpty;
-
-// Grow the buffer.
-- (void) changeBufferSize: (int) capacity;
-
-// Get the size of the raw buffer.
-- (int) rawBufferSize;
-
-// Return the number of raw (unwrapped) lines
-- (int) numRawLines;
-
-// Return the position of the first used character in the raw buffer. Only valid if not empty.
-- (int) startOffset;
-
-// Return the length of a raw (unwrapped) line
-- (int) getRawLineLength: (int) linenum;
-
-// Remove extra space from the end of the buffer. Future appends will fail.
-- (void) shrinkToFit;
-
-// Append a value to cumulativeLineLengths.
-- (void) _appendCumulativeLineLength: (int) cumulativeLength;
-
-// Return a raw line
-- (screen_char_t*) rawLine: (int) linenum;
-
-// NSLog the contents of the block. For debugging.
-- (void)dump:(int)rawOffset;
-@end
+#import "LineBufferPosition.h"
+#import "LineBufferHelpers.h"
+#import "VT100GridTypes.h"
 
 // A LineBuffer represents an ordered collection of strings of screen_char_t. Each string forms a
 // logical line of text plus color information. Logic is provided for the following major functions:
@@ -235,7 +87,11 @@ typedef struct FindContext {
 // that is to say, this buffer contains only a prefix or infix of the entire line.
 //
 // NOTE: call dropExcessLinesWithWidth after this if you want to limit the buffer to max_lines.
-- (void) appendLine: (screen_char_t*) buffer length: (int) length partial: (BOOL) partial width: (int) width;
+- (void)appendLine:(screen_char_t*)buffer
+            length:(int)length
+           partial:(BOOL)partial
+             width:(int)width
+         timestamp:(NSTimeInterval)timestamp;
 
 // If more lines are in the buffer than max_lines, call this function. It will adjust the count
 // of excess lines and try to free the first block(s) if they are unused. Because this could happen
@@ -245,6 +101,9 @@ typedef struct FindContext {
 //
 // NOTE: This invalidates the cursor position.
 - (int) dropExcessLinesWithWidth: (int) width;
+
+// Returns the timestamp associated with a line when wrapped to the specified width.
+- (NSTimeInterval)timestampForLineNumber:(int)lineNum width:(int)width;
 
 // Copy a line into the buffer. If the line is shorter than 'width' then only the first 'width'
 // characters will be modified.
@@ -261,7 +120,10 @@ typedef struct FindContext {
 // Copy up to width chars from the last line into *ptr. The last line will be removed or
 // truncated from the buffer. Sets *includesEndOfLine to true if this line should have a
 // continuation marker.
-- (BOOL) popAndCopyLastLineInto: (screen_char_t*) ptr width: (int) width includesEndOfLine: (int*) includesEndOfLine;
+- (BOOL)popAndCopyLastLineInto:(screen_char_t*)ptr
+                         width:(int)width
+             includesEndOfLine:(int*)includesEndOfLine
+                     timestamp:(NSTimeInterval *)timestampPtr;
 
 // Get the number of buffer lines at a given width.
 - (int) numLinesWithWidth: (int) width;
@@ -279,11 +141,14 @@ typedef struct FindContext {
 // Print the raw lines to the console for debugging.
 - (void) dump;
 
-// Search for a substring. If found, return the position of the hit. Otherwise return -1. Use 0 for the start to indicate the beginning of the buffer or
-// pass the result of a previous findSubstring result. The number of positions the result occupies will be set in *length (which would be different than the
-// length of the substring in the presence of double-width characters.
-- (void)initFind:(NSString*)substring startingAt:(int)start options:(int)options withContext:(FindContext*)context;
-- (void)releaseFind:(FindContext*)context;
+// Set up the find context. See FindContext.h for options bit values.
+- (void)prepareToSearchFor:(NSString*)substring
+                startingAt:(LineBufferPosition *)start
+                   options:(int)options
+               withContext:(FindContext*)context;
+
+// Performs a search. Use prepareToSearchFor:startingAt:options:withContext: to initialize
+// the FindContext prior to calling this.
 - (void)findSubstring:(FindContext*)context stopAt:(int)stopAt;
 
 // Convert a position (as returned by findSubstring) into an x,y position.
@@ -293,18 +158,22 @@ typedef struct FindContext {
 // Returns an array of XYRange values
 - (NSArray*)convertPositions:(NSArray*)resultRanges withWidth:(int)width;
 
-// Convert x,y coordinates (with y=0 being the first line) into a position. Offset is added to the position safely.
-// Returns TRUE if the conversion was successful, false, if out of bounds.
-- (BOOL) convertCoordinatesAtX: (int) x atY: (int) y withWidth: (int) width toPosition: (int*) position offset:(int)offset;
+- (LineBufferPosition *)positionForCoordinate:(VT100GridCoord)coord width:(int)width offset:(int)offset;
+- (VT100GridCoord)coordinateForPosition:(LineBufferPosition *)position width:(int)width ok:(BOOL *)ok;
 
 // Returns the position at the stat of the buffer
+// DEPRECATED
 - (int) firstPos;
 
 // Returns the position at the end of the buffer
+// DEPRECATED
 - (int) lastPos;
 
+- (LineBufferPosition *)firstPosition;
+- (LineBufferPosition *)lastPosition;
+
 // Convert the block,offset in a findcontext into an absolute position.
-- (long long)absPositionOfFindContext:(FindContext)findContext;
+- (long long)absPositionOfFindContext:(FindContext *)findContext;
 // Convert an absolute position into a position.
 - (int)positionForAbsPosition:(long long)absPosition;
 // Convert a position into an absolute position.
@@ -313,4 +182,9 @@ typedef struct FindContext {
 // Set the start location of a find context to an absolute position.
 - (void)storeLocationOfAbsPos:(long long)absPos
                     inContext:(FindContext *)context;
+
+- (NSString *)debugString;
+- (void)dumpWrappedToWidth:(int)width;
+- (NSString *)compactLineDumpWithWidth:(int)width;
+
 @end

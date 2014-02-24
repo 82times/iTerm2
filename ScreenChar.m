@@ -30,16 +30,68 @@
  */
 
 #import "ScreenChar.h"
+#import "charmaps.h"
 
 // Maps codes to strings
 static NSMutableDictionary* complexCharMap;
 // Maps strings to codes.
 static NSMutableDictionary* inverseComplexCharMap;
+// Image info. Maps a NSNumber with the image's code to an ImageInfo object.
+static NSMutableDictionary* gImages;
 // Next available code.
 static int ccmNextKey = 1;
 // If ccmNextKey has wrapped then this is set to true and we have to delete old
 // strings before creating a new one with a recycled code.
 static BOOL hasWrapped = NO;
+
+@interface ImageInfo ()
+@property(nonatomic, retain) NSImage *embeddedImage;
+@property(nonatomic, assign) unichar code;
+@end
+
+@implementation ImageInfo
+
+- (void)dealloc {
+    [_filename release];
+    [_image release];
+    [_embeddedImage release];
+    [super dealloc];
+}
+
+- (NSImage *)imageEmbeddedInRegionOfSize:(NSSize)region {
+    if (!_image) {
+        return nil;
+    }
+    if (!NSEqualSizes(_embeddedImage.size, region)) {
+        NSImage *canvas = [[[NSImage alloc] init] autorelease];
+        NSSize size;
+        if (!_preserveAspectRatio) {
+            size = region;
+        } else {
+            double imageAR = _image.size.width / _image.size.height;
+            double canvasAR = region.width / region.height;
+            if (imageAR > canvasAR) {
+                // image is wider than canvas, add black bars on top and bottom
+                size = NSMakeSize(region.width, region.width / imageAR);
+            } else {
+                // image is taller than canvas, add black bars on sides
+                size = NSMakeSize(region.height * imageAR, region.height);
+            }
+        }
+        [canvas setSize:region];
+        [canvas lockFocus];
+        [_image drawInRect:NSMakeRect((region.width - size.width) / 2,
+                                      (region.height - size.height) / 2,
+                                      size.width,
+                                      size.height)];
+        [canvas unlockFocus];
+        
+        self.embeddedImage = canvas;
+    }
+    return _embeddedImage;
+}
+
+@end
 
 @implementation ScreenCharArray
 @synthesize line = _line;
@@ -47,12 +99,28 @@ static BOOL hasWrapped = NO;
 @synthesize eol = _eol;
 @end
 
+static void CreateComplexCharMapIfNeeded() {
+    if (!complexCharMap) {
+        complexCharMap = [[NSMutableDictionary alloc] initWithCapacity:1000];
+        // Add box-drawing chars, which are reserved. They are drawn using
+        // bezier paths but it's important that the keys refer to an existing
+        // string for general correctness.
+        for (int i = 0; i < 256; i++) {
+            if (lineDrawingCharFlags[i]) {
+                complexCharMap[@(charmap[i])] = [NSString stringWithFormat:@"%C", charmap[i]];
+            }
+        }
+        inverseComplexCharMap = [[NSMutableDictionary alloc] initWithCapacity:1000];
+    }
+}
+
 NSString* ComplexCharToStr(int key)
 {
     if (key == UNICODE_REPLACEMENT_CHAR) {
         return ReplacementString();
     }
 
+    CreateComplexCharMapIfNeeded();
     return [complexCharMap objectForKey:[NSNumber numberWithInt:key]];
 }
 
@@ -86,7 +154,7 @@ int ExpandScreenChar(screen_char_t* sct, unichar* dest) {
     }
     assert(value);
     [value getCharacters:dest];
-    return [value length];
+    return (int)[value length];
 }
 
 UTF32Char CharToLongChar(unichar code, BOOL isComplex)
@@ -101,28 +169,97 @@ UTF32Char CharToLongChar(unichar code, BOOL isComplex)
     }
 }
 
+static BOOL ComplexCharKeyIsReserved(int k) {
+    switch (k) {
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_RIGHT:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL_AND_LEFT:
+        case ITERM_BOX_DRAWINGS_LIGHT_UP_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_DOWN_AND_HORIZONTAL:
+        case ITERM_BOX_DRAWINGS_LIGHT_VERTICAL:
+            return YES;
+
+        default:
+            return NO;
+    }
+}
+
+screen_char_t ImageCharForNewImage(NSString *name, int width, int height, BOOL preserveAspectRatio)
+{
+    if (!gImages) {
+        gImages = [[NSMutableDictionary alloc] init];
+    }
+    int newKey;
+    do {
+        newKey = ccmNextKey++;
+    } while (ComplexCharKeyIsReserved(newKey));
+
+    screen_char_t c = { 0 };
+    c.image = 1;
+    c.code = newKey;
+
+    ImageInfo *imageInfo = [[[ImageInfo alloc] init] autorelease];
+    imageInfo.filename = name;
+    imageInfo.preserveAspectRatio = preserveAspectRatio;
+    imageInfo.size = NSMakeSize(width, height);
+    imageInfo.code = c.code;
+    gImages[@(c.code)] = imageInfo;
+
+    return c;
+}
+
+void SetPositionInImageChar(screen_char_t *charPtr, int x, int y)
+{
+    charPtr->foregroundColor = x;
+    charPtr->backgroundColor = y;
+}
+
+void SetDecodedImage(unichar code, NSImage *image)
+{
+    ImageInfo *imageInfo = gImages[@(code)];
+    imageInfo.image = image;
+}
+
+void ReleaseImage(unichar code) {
+    [gImages removeObjectForKey:@(code)];
+}
+
+ImageInfo *GetImageInfo(unichar code) {
+    return gImages[@(code)];
+}
+
+VT100GridCoord GetPositionOfImageInChar(screen_char_t c) {
+    return VT100GridCoordMake(c.foregroundColor,
+                              c.backgroundColor);
+}
+
 int GetOrSetComplexChar(NSString* str)
 {
-    if (!complexCharMap) {
-        complexCharMap = [[NSMutableDictionary alloc] initWithCapacity:1000];
-        inverseComplexCharMap = [[NSMutableDictionary alloc] initWithCapacity:1000];
-    }
+    CreateComplexCharMapIfNeeded();
     NSNumber* number = [inverseComplexCharMap objectForKey:str];
     if (number) {
         return [number intValue];
     }
 
-    int newKey = ccmNextKey++;
-    number = [NSNumber numberWithInt:newKey];
+    int newKey;
+    do {
+        newKey = ccmNextKey++;
+    } while (ComplexCharKeyIsReserved(newKey));
+
+    number = @(newKey);
     if (hasWrapped) {
-        NSString* oldStr = [complexCharMap objectForKey:number];
+        NSString* oldStr = complexCharMap[number];
         if (oldStr) {
             [inverseComplexCharMap removeObjectForKey:oldStr];
         }
     }
-    [complexCharMap setObject:str
-                       forKey:number];
-    [inverseComplexCharMap setObject:number forKey:str];
+    complexCharMap[number] = str;
+    inverseComplexCharMap[str] = number;
     if (ccmNextKey == 0xf000) {
         ccmNextKey = 1;
         hasWrapped = YES;
@@ -160,6 +297,35 @@ int BeginComplexChar(unichar initialCodePoint, unichar combiningChar)
     temp[1] = combiningChar;
     return GetOrSetComplexChar([NSString stringWithCharacters:temp length:2]);
 }
+
+BOOL StringContainsCombiningMark(NSString *s)
+{
+    if (s.length < 2) return NO;
+    UTF32Char value = 0;
+    unichar high = 0;
+    for (int i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (high) {
+            if (IsLowSurrogate(c)) {
+                value = DecodeSurrogatePair(high, c);
+                high = 0;
+            } else {
+                high = 0;
+                continue;
+            }
+        } else if (IsHighSurrogate(c)) {
+            high = c;
+            continue;
+        } else {
+            value = c;
+        }
+        if (IsCombiningMark(value)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 
 BOOL IsCombiningMark(UTF32Char c)
 {
@@ -347,14 +513,17 @@ void DumpScreenCharArray(screen_char_t* screenChars, int lineLength) {
 
 NSString* ScreenCharArrayToStringDebug(screen_char_t* screenChars,
                                        int lineLength) {
-  NSMutableString* result = [NSMutableString stringWithCapacity:lineLength];
-  for (int i = 0; i < lineLength; ++i) {
-    unichar c = screenChars[i].code;
-    if (c != DWC_RIGHT) {
-      [result appendString:ScreenCharToStr(&screenChars[i])];
+    while (lineLength > 0 && screenChars[lineLength - 1].code == 0) {
+        --lineLength;
     }
-  }
-  return result;
+    NSMutableString* result = [NSMutableString stringWithCapacity:lineLength];
+    for (int i = 0; i < lineLength; ++i) {
+        unichar c = screenChars[i].code;
+        if (c != 0 && c != DWC_RIGHT) {
+            [result appendString:ScreenCharToStr(&screenChars[i])];
+        }
+    }
+    return result;
 }
 
 int EffectiveLineLength(screen_char_t* theLine, int totalLength) {
@@ -365,3 +534,179 @@ int EffectiveLineLength(screen_char_t* theLine, int totalLength) {
     }
     return 0;
 }
+
+// Convert a string into an array of screen characters, dealing with surrogate
+// pairs, combining marks, nonspacing marks, and double-width characters.
+void StringToScreenChars(NSString *s,
+                         screen_char_t *buf,
+                         screen_char_t fg,
+                         screen_char_t bg,
+                         int *len,
+                         BOOL ambiguousIsDoubleWidth,
+                         int* cursorIndex) {
+    unichar *sc;
+    int l = [s length];
+    int i;
+    int j;
+
+    const int kBufferElements = 1024;
+    unichar staticBuffer[kBufferElements];
+    unichar* dynamicBuffer = 0;
+    if ([s length] > kBufferElements) {
+        sc = dynamicBuffer = (unichar *) calloc(l, sizeof(unichar));
+    } else {
+        sc = staticBuffer;
+    }
+
+    [s getCharacters:sc];
+    int lastInitializedChar = -1;
+    BOOL foundCursor = NO;
+    for (i = j = 0; i < l; i++, j++) {
+        // j may repeat in consecutive iterations of the loop but i increases
+        // monotonically, so initialize complexChar with i instead of j.
+        buf[i].complexChar = NO;
+
+        if (cursorIndex && !foundCursor && *cursorIndex == i) {
+            foundCursor = YES;
+            *cursorIndex = j;
+        }
+        if (j > lastInitializedChar) {
+            buf[j].code = sc[i];
+            buf[j].complexChar = NO;
+
+            buf[j].foregroundColor = fg.foregroundColor;
+            buf[j].fgGreen = fg.fgGreen;
+            buf[j].fgBlue = fg.fgBlue;
+
+            buf[j].backgroundColor = bg.backgroundColor;
+            buf[j].bgGreen = bg.bgGreen;
+            buf[j].bgBlue = bg.bgBlue;
+
+            buf[j].foregroundColorMode = fg.foregroundColorMode;
+            buf[j].backgroundColorMode = bg.backgroundColorMode;
+
+            buf[j].bold = fg.bold;
+            buf[j].italic = fg.italic;
+            buf[j].blink = fg.blink;
+            buf[j].underline = fg.underline;
+            buf[j].image = NO;
+
+            buf[j].unused = 0;
+            lastInitializedChar = j;
+        }
+
+        if (sc[i] >= ITERM2_PRIVATE_BEGIN && sc[i] <= ITERM2_PRIVATE_END) {
+            // Translate iTerm2's private-use characters into a "?". Although the replacement
+            // character renders as a double-width char in a single-width char's space and is ugly,
+            // some fonts use dwc's to add extra glyphs. It's kinda sketch, but it's better form to
+            // render what you get than to try to be clever and break such edge cases.
+            buf[j].code = '?';
+        } else if (sc[i] > 0xa0 &&
+                   !IsCombiningMark(sc[i]) &&
+                   !IsLowSurrogate(sc[i]) &&
+                   !IsHighSurrogate(sc[i]) &&
+                   [NSString isDoubleWidthCharacter:sc[i]
+                             ambiguousIsDoubleWidth:ambiguousIsDoubleWidth]) {
+            // This code path is for double-width characters in BMP only.
+            j++;
+            buf[j].code = DWC_RIGHT;
+            buf[j].complexChar = NO;
+
+            buf[j].foregroundColor = fg.foregroundColor;
+            buf[j].fgGreen = fg.fgGreen;
+            buf[j].fgBlue = fg.fgBlue;
+
+            buf[j].backgroundColor = bg.backgroundColor;
+            buf[j].bgGreen = bg.fgGreen;
+            buf[j].bgBlue = bg.fgBlue;
+
+            buf[j].foregroundColorMode = fg.foregroundColorMode;
+            buf[j].backgroundColorMode = bg.backgroundColorMode;
+
+            buf[j].bold = fg.bold;
+            buf[j].italic = fg.italic;
+            buf[j].blink = fg.blink;
+            buf[j].underline = fg.underline;
+
+            buf[j].unused = 0;
+        } else if (sc[i] == 0xfeff ||  // zero width no-break space
+                   sc[i] == 0x200b ||  // zero width space
+                   sc[i] == 0x200c ||  // zero width non-joiner
+                   sc[i] == 0x200d) {  // zero width joiner
+            j--;
+            lastInitializedChar--;
+        } else if (IsCombiningMark(sc[i]) || IsLowSurrogate(sc[i])) {
+            if (j > 0) {
+                BOOL movedBackOverDwcRight = NO;
+                j--;
+                if (buf[j].code == DWC_RIGHT && j > 0 && IsCombiningMark(sc[i])) {
+                    // This happens easily with ambiguous-width characters, where something like
+                    // á is treated as double-width and a subsequent combining mark needs to modify
+                    // at the real code, not the DWC_RIGHT.
+                    j--;
+                    movedBackOverDwcRight = YES;
+                }
+                lastInitializedChar--;
+                if (buf[j].complexChar) {
+                    // Adding a combining mark to a char that already has one or was
+                    // built by surrogates.
+                    buf[j].code = AppendToComplexChar(buf[j].code, sc[i]);
+                } else {
+                    buf[j].code = BeginComplexChar(buf[j].code, sc[i]);
+                    buf[j].complexChar = YES;
+                }
+                if (movedBackOverDwcRight) {
+                    j++;
+                }
+                if (IsLowSurrogate(sc[i])) {
+                    NSString* str = ComplexCharToStr(buf[j].code);
+                    if ([NSString isDoubleWidthCharacter:DecodeSurrogatePair([str characterAtIndex:0], [str characterAtIndex:1])
+                                  ambiguousIsDoubleWidth:ambiguousIsDoubleWidth]) {
+                        j++;
+                        buf[j].code = DWC_RIGHT;
+                        buf[j].complexChar = NO;
+
+                        buf[j].foregroundColor = fg.foregroundColor;
+                        buf[j].fgGreen = fg.fgGreen;
+                        buf[j].fgBlue = fg.fgBlue;
+
+                        buf[j].backgroundColor = bg.backgroundColor;
+                        buf[j].bgGreen = bg.fgGreen;
+                        buf[j].bgBlue = bg.fgBlue;
+
+                        buf[j].foregroundColorMode = fg.foregroundColorMode;
+                        buf[j].backgroundColorMode = bg.backgroundColorMode;
+
+                        buf[j].bold = fg.bold;
+                        buf[j].italic = fg.italic;
+                        buf[j].blink = fg.blink;
+                        buf[j].underline = fg.underline;
+
+                        buf[j].unused = 0;
+                    }
+                }
+            }
+        }
+    }
+    *len = j;
+    if (cursorIndex && !foundCursor && *cursorIndex >= i) {
+        // We were asked for the position of the cursor to the right
+        // of the last character.
+        *cursorIndex = j;
+    }
+    if (dynamicBuffer) {
+        free(dynamicBuffer);
+    }
+}
+
+void ConvertCharsToGraphicsCharset(screen_char_t *s, int len)
+{
+    int i;
+
+    for (i = 0; i < len; i++) {
+        assert(!s[i].complexChar);
+        s[i].complexChar = lineDrawingCharFlags[(int)(s[i].code)];
+        s[i].code = charmap[(int)(s[i].code)];
+    }
+}
+

@@ -32,7 +32,8 @@
 
 @implementation FakeWindow
 
-- (id)initFromRealWindow:(PseudoTerminal*)aTerm session:(PTYSession*)aSession
+- (id)initFromRealWindow:(NSWindowController<iTermWindowController> *)aTerm
+                 session:(PTYSession*)aSession
 {
     self = [super init];
     if (!self) {
@@ -56,13 +57,10 @@
     if (pendingLabelColor) {
         [pendingLabelColor release];
     }
-    if (pendingTabColor) {
-        [pendingTabColor release];
-    }
     [super dealloc];
 }
 
-- (void)rejoin:(PseudoTerminal*)aTerm
+- (void)rejoin:(NSWindowController<iTermWindowController> *)aTerm
 {
     [session release];
     if (hasPendingClose) {
@@ -90,15 +88,13 @@
     if (pendingLabelColor) {
         [aTerm setLabelColor:pendingLabelColor forTabViewItem:[[session tab] tabViewItem]];
     }
-    if (pendingTabColor) {
-        [aTerm setTabColor:pendingTabColor forTabViewItem:[[session tab]tabViewItem]];
-    }
     if (hasPendingSetWindowTitle) {
         [aTerm setWindowTitle];
     }
     if (hasPendingResetTempTitle) {
         [aTerm resetTempTitle];
     }
+    [aTerm updateTabColors];
 }
 
 - (void)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height
@@ -133,11 +129,11 @@
     hasPendingClose = YES;
 }
 
-- (IBAction)nextTab:(id)sender
+- (void)nextTab:(id)sender
 {
 }
 
-- (IBAction)previousTab:(id)sender
+- (void)previousTab:(id)sender
 {
 }
 
@@ -146,22 +142,6 @@
     [pendingLabelColor release];
     pendingLabelColor = color;
     [pendingLabelColor retain];
-}
-
-- (void)setTabColor:(NSColor *)color forTabViewItem:tabViewItem
-{
-    [pendingTabColor release];
-    pendingTabColor = color;
-    [pendingTabColor retain];
-}
-
-- (NSColor*)tabColorForTabViewItem:(NSTabViewItem*)tabViewItem
-{
-    if (pendingTabColor) {
-        return pendingTabColor;
-    } else {
-        return [realWindow tabColorForTabViewItem:tabViewItem];
-    }
 }
 
 - (void)enableBlur:(double)radius
@@ -251,6 +231,10 @@
 - (NSScrollerStyle)scrollerStyle
 {
     return [self anyFullScreen] ? NSScrollerStyleOverlay : [NSScroller preferredScrollerStyle];
+}
+
+- (void)updateTabColors
+{
 }
 
 @end

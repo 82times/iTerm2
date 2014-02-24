@@ -29,14 +29,15 @@
 
     // accessors
 - (NSEvent *)lastMouseDownEvent;
+- (NSEvent *)lastMiddleMouseDownEvent;
 - (void)setLastMouseDownEvent:(NSEvent *)event;
+- (void)setLastMiddleMouseDownEvent:(NSEvent *)event;
 
     // contents
 - (void)addTabViewItem:(NSTabViewItem *)item;
 - (void)removeTabForCell:(PSMTabBarCell *)cell;
 
     // draw
-- (void)update;
 - (void)update:(BOOL)animate;
 - (void)_removeCellTrackingRects;
 - (void)_finishCellUpdate:(NSArray *)newWidths;
@@ -204,6 +205,7 @@
     [_addTabButton release];
     [partnerView release];
     [_lastMouseDownEvent release];
+    [_lastMiddleMouseDownEvent release];
     [style release];
 
     [self unregisterDraggedTypes];
@@ -245,12 +247,24 @@
     _lastMouseDownEvent = event;
 }
 
-- (id)delegate
+- (NSEvent *)lastMiddleMouseDownEvent
+{
+    return _lastMiddleMouseDownEvent;
+}
+
+- (void)setLastMiddleMouseDownEvent:(NSEvent *)event
+{
+    [event retain];
+    [_lastMiddleMouseDownEvent release];
+    _lastMiddleMouseDownEvent = event;
+}
+
+- (id<PSMTabBarControlDelegate>)delegate
 {
     return delegate;
 }
 
-- (void)setDelegate:(id)object
+- (void)setDelegate:(id<PSMTabBarControlDelegate>)object
 {
     delegate = object;
 
@@ -852,13 +866,13 @@
     NSTabViewItem *theItem = [tabView tabViewItemAtIndex:sourceIndex];
     BOOL reselect = ([tabView selectedTabViewItem] == theItem);
 
-    id tempDelegate = [tabView delegate];
+    id<NSTabViewDelegate> tempDelegate = [tabView delegate];
     [tabView setDelegate:nil];
     [theItem retain];
     [tabView removeTabViewItem:theItem];
     [tabView insertTabViewItem:theItem atIndex:destIndex];
     [theItem release];
-    
+
     id cell = [_cells objectAtIndex:sourceIndex];
     [cell retain];
     [_cells removeObjectAtIndex:sourceIndex];
@@ -1374,6 +1388,12 @@
     return YES;
 }
 
+- (void)otherMouseDown:(NSEvent *)theEvent {
+    if ([theEvent buttonNumber] == 2) {
+        [self setLastMiddleMouseDownEvent:theEvent];
+    }
+}
+
 - (void)mouseDown:(NSEvent *)theEvent
 {
     _didDrag = NO;
@@ -1470,6 +1490,22 @@
                 [[self delegate] tabView:tabView shouldDragTabViewItem:[cell representedObject] fromTabBar:self]) {
             _didDrag = YES;
             [[PSMTabDragAssistant sharedDragAssistant] startDraggingCell:cell fromTabBar:self withMouseDownEvent:[self lastMouseDownEvent]];
+        }
+    }
+}
+
+- (void)otherMouseUp:(NSEvent *)theEvent
+{
+    // Middle click closes a tab, even if the click is not on the close button.
+    if ([theEvent buttonNumber] == 2 && !_resizing) {
+        NSPoint mousePt = [self convertPoint:[theEvent locationInWindow] fromView:nil];
+        NSRect cellFrame;
+        PSMTabBarCell *cell = [self cellForPoint:mousePt cellFrame:&cellFrame];
+        NSRect mouseDownCellFrame;
+        PSMTabBarCell *mouseDownCell = [self cellForPoint:[self convertPoint:[[self lastMiddleMouseDownEvent] locationInWindow] fromView:nil]
+                                                cellFrame:&mouseDownCellFrame];
+        if (cell && cell == mouseDownCell) {
+            [self closeTabClick:cell];
         }
     }
 }
@@ -1619,7 +1655,7 @@
 {
     // validate the drag operation only if there's a valid tab bar to drop into
     BOOL badType = [[[sender draggingPasteboard] types] indexOfObject:@"PSMTabBarControlItemPBType"] == NSNotFound;
-    if (badType && [[self delegate] respondsToSelector:@selector(tabView:shouldAcceptDragFromSender:sender:)] &&
+    if (badType && [[self delegate] respondsToSelector:@selector(tabView:shouldAcceptDragFromSender:)] &&
         ![[self delegate] tabView:tabView shouldAcceptDragFromSender:sender]) {
         badType = YES;
     }
@@ -1672,7 +1708,8 @@
 - (void)closeTabClick:(id)sender
 {
     NSTabViewItem *item = [sender representedObject];
-    [sender retain];
+    [[sender retain] autorelease];
+    [[item retain] autorelease];
     if(([_cells count] == 1) && (![self canCloseOnlyTab]))
         return;
 
@@ -1684,13 +1721,9 @@
         }
     }
 
-    [item retain];
     if(([self delegate]) && ([[self delegate] respondsToSelector:@selector(closeTab:)])){
-        [(id<PTYTaskDelegate>)[self delegate] closeTab:[item identifier]];
+        [[self delegate] closeTab:[item identifier]];
     }
-
-    [item release];
-    [sender release];
 }
 
 - (void)tabClick:(id)sender
@@ -2016,6 +2049,7 @@
         [aCoder encodeObject:partnerView forKey:@"PSMpartnerView"];
         [aCoder encodeBool:_awakenedFromNib forKey:@"PSMawakenedFromNib"];
         [aCoder encodeObject:_lastMouseDownEvent forKey:@"PSMlastMouseDownEvent"];
+        [aCoder encodeObject:_lastMiddleMouseDownEvent forKey:@"PSMlastMiddleMouseDownEvent"];
         [aCoder encodeObject:delegate forKey:@"PSMdelegate"];
         [aCoder encodeBool:_useOverflowMenu forKey:@"PSMuseOverflowMenu"];
         [aCoder encodeBool:_automaticallyAnimates forKey:@"PSMautomaticallyAnimates"];
@@ -2051,6 +2085,7 @@
             partnerView = [[aDecoder decodeObjectForKey:@"PSMpartnerView"] retain];
             _awakenedFromNib = [aDecoder decodeBoolForKey:@"PSMawakenedFromNib"];
             _lastMouseDownEvent = [[aDecoder decodeObjectForKey:@"PSMlastMouseDownEvent"] retain];
+            _lastMiddleMouseDownEvent = [[aDecoder decodeObjectForKey:@"PSMlastMiddleMouseDownEvent"] retain];
             _useOverflowMenu = [aDecoder decodeBoolForKey:@"PSMuseOverflowMenu"];
             _automaticallyAnimates = [aDecoder decodeBoolForKey:@"PSMautomaticallyAnimates"];
             delegate = [[aDecoder decodeObjectForKey:@"PSMdelegate"] retain];

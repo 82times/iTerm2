@@ -36,10 +36,8 @@
 #define OSX_TIGERORLATER (floor(NSAppKitVersionNumber) > 743)
 #define OSX_LEOPARDORLATER (floor(NSAppKitVersionNumber) > 824)
 
+BOOL IsMavericksOrLater(void);
 BOOL IsMountainLionOrLater(void);
-BOOL IsLionOrLater(void);
-BOOL IsSnowLeopardOrLater(void);
-BOOL IsLeopard(void);
 
 #if MAC_OS_X_VERSION_MAX_ALLOWED < 1070
 static const int NSWindowCollectionBehaviorFullScreenPrimary = 1 << 7;

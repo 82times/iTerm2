@@ -26,25 +26,28 @@
  */
 
 #import "iTermApplicationDelegate.h"
-#import "iTermController.h"
-#import "ITAddressBookMgr.h"
-#import "PreferencePanel.h"
-#import "PseudoTerminal.h"
-#import "PTYSession.h"
-#import "VT100Terminal.h"
-#import "PTYWindow.h"
-#import "PTYTextView.h"
-#import "NSStringITerm.h"
-#import "ProfilesWindow.h"
-#import "PTYTab.h"
-#import "iTermExpose.h"
+
 #import "ColorsMenuItemView.h"
-#import "iTermFontPanel.h"
+#import "HotkeyWindowController.h"
+#import "ITAddressBookMgr.h"
+#import "NSStringITerm.h"
+#import "NSView+RecursiveDescription.h"
+#import "PTYSession.h"
+#import "PTYTab.h"
+#import "PTYTextView.h"
+#import "PTYWindow.h"
+#import "PreferencePanel.h"
+#import "ProfilesWindow.h"
+#import "PseudoTerminal.h"
 #import "PseudoTerminalRestorer.h"
 #import "ToastWindowController.h"
-#include <unistd.h>
-#include <sys/stat.h>
+#import "VT100Terminal.h"
+#import "iTermController.h"
+#import "iTermExpose.h"
+#import "iTermFontPanel.h"
 #import <objc/runtime.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static NSString *APP_SUPPORT_DIR = @"~/Library/Application Support/iTerm";
 static NSString *SCRIPT_DIRECTORY = @"~/Library/Application Support/iTerm/Scripts";
@@ -53,17 +56,16 @@ static NSString *ITERM2_FLAG = @"~/Library/Application Support/iTerm/version.txt
 static NSString *ITERM2_QUIET = @"~/Library/Application Support/iTerm/quiet";
 static NSString *kUseBackgroundPatternIndicatorKey = @"Use background pattern indicator";
 NSString *kUseBackgroundPatternIndicatorChangedNotification = @"kUseBackgroundPatternIndicatorChangedNotification";
+static NSString *const kMultiLinePasteWarningUserDefaultsKey = @"Multi-Line Paste Warning";
 static BOOL gStartupActivitiesPerformed = NO;
 // Prior to 8/7/11, there was only one window arrangement, always called Default.
 static NSString *LEGACY_DEFAULT_ARRANGEMENT_NAME = @"Default";
-NSMutableString* gDebugLogStr = nil;
-NSMutableString* gDebugLogStr2 = nil;
 static BOOL ranAutoLaunchScript = NO;
-BOOL gDebugLogging = NO;
-int gDebugLogFile = -1;
 static BOOL hasBecomeActive = NO;
 
 @interface iTermApplicationDelegate ()
+
+@property(nonatomic, readwrite) BOOL workspaceSessionActive;
 
 - (void)_updateToolbeltMenuItem;
 
@@ -84,14 +86,6 @@ static BOOL hasBecomeActive = NO;
 // NSApplication delegate methods
 - (void)applicationWillFinishLaunching:(NSNotification *)aNotification
 {
-    // Check the system version for minimum requirements.
-    SInt32 gSystemVersion;
-    Gestalt(gestaltSystemVersion, &gSystemVersion);
-    if (gSystemVersion < 0x1050) {
-        NSRunAlertPanel(@"Sorry", @"iTerm2 requires OS 10.5 or newer.", @"OK", nil, nil);
-        [NSApp terminate: self];
-    }
-
     // set the TERM_PROGRAM environment variable
     putenv("TERM_PROGRAM=iTerm.app");
 
@@ -104,46 +98,6 @@ static BOOL hasBecomeActive = NO;
 
     [ToolbeltView populateMenu:toolbeltMenu];
     [self _updateToolbeltMenuItem];
-    [self setFutureApplicationPresentationOptions:NSApplicationPresentationFullScreen unset:0];
-}
-
-- (void)setFutureApplicationPresentationOptions:(int)flags unset:(int)antiflags
-{
-    if ([NSApp respondsToSelector:@selector(presentationOptions)]) {
-        // This crazy hackery is done so that we can use 10.6 and 10.7 features
-        // while compiling against the 10.5 SDK.
-
-        // presentationOptions =  [NSApp presentationOptions]
-        NSMethodSignature *presentationOptionsSignature = [object_getClass(NSApp)
-            instanceMethodSignatureForSelector:@selector(presentationOptions)];
-        NSInvocation *presentationOptionsInvocation = [NSInvocation
-            invocationWithMethodSignature:presentationOptionsSignature];
-        [presentationOptionsInvocation setTarget:NSApp];
-        [presentationOptionsInvocation setSelector:@selector(presentationOptions)];
-        [presentationOptionsInvocation invoke];
-
-        NSUInteger presentationOptions;
-        [presentationOptionsInvocation getReturnValue:&presentationOptions];
-
-        presentationOptions |= flags;
-        presentationOptions &= ~antiflags;
-
-        // [NSAppObj setPresentationOptions:presentationOptions];
-        NSMethodSignature *setSig = [object_getClass(NSApp) instanceMethodSignatureForSelector:@selector(setPresentationOptions:)];
-        NSInvocation *setInv = [NSInvocation invocationWithMethodSignature:setSig];
-        [setInv setTarget:NSApp];
-        [setInv setSelector:@selector(setPresentationOptions:)];
-        [setInv setArgument:&presentationOptions atIndex:2];
-        [setInv invoke];
-    } else {
-        // Emulate setPresentationOptions API for OS 10.5.
-        if (flags & NSApplicationPresentationAutoHideMenuBar) {
-            SetSystemUIMode(kUIModeAllHidden, kUIOptionAutoShowMenuBar);
-        } else if (antiflags & NSApplicationPresentationAutoHideMenuBar) {
-            SetSystemUIMode(kUIModeNormal, 0);
-        }
-
-    }
 }
 
 - (void)_performIdempotentStartupActivities
@@ -314,10 +268,13 @@ static BOOL hasBecomeActive = NO;
     PreferencePanel* ppanel = [PreferencePanel sharedInstance];
     // Code could be 0 (e.g., A on an American keyboard) and char is also sometimes 0 (seen in bug 2501).
     if ([ppanel hotkey] && ([ppanel hotkeyCode] || [ppanel hotkeyChar])) {
-        [[iTermController sharedInstance] registerHotkey:[ppanel hotkeyCode] modifiers:[ppanel hotkeyModifiers]];
+        [[HotkeyWindowController sharedInstance] registerHotkey:[ppanel hotkeyCode] modifiers:[ppanel hotkeyModifiers]];
     }
     if ([ppanel isAnyModifierRemapped]) {
-        [[iTermController sharedInstance] beginRemappingModifiers];
+        // Use a brief delay so windows have a chance to open before the dialog is shown.
+        [[HotkeyWindowController sharedInstance] performSelector:@selector(beginRemappingModifiers)
+                                                      withObject:nil
+                                                      afterDelay:0.5];
     }
     [self _updateArrangementsMenu:windowArrangements_];
 
@@ -332,6 +289,25 @@ static BOOL hasBecomeActive = NO;
                afterDelay:0];
     [[NSNotificationCenter defaultCenter] postNotificationName:kApplicationDidFinishLaunchingNotification
                                                         object:nil];
+    
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
+                                                           selector:@selector(workspaceSessionDidBecomeActive:)
+                                                               name:NSWorkspaceSessionDidBecomeActiveNotification
+                                                             object:nil];
+    
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
+                                                           selector:@selector(workspaceSessionDidResignActive:)
+                                                               name:NSWorkspaceSessionDidResignActiveNotification
+                                                             object:nil];
+
+}
+
+- (void)workspaceSessionDidBecomeActive:(NSNotification *)notification {
+    _workspaceSessionActive = YES;
+}
+
+- (void)workspaceSessionDidResignActive:(NSNotification *)notification {
+    _workspaceSessionActive = NO;
 }
 
 - (BOOL)applicationShouldTerminate:(NSNotification *)theNotification
@@ -372,7 +348,7 @@ static BOOL hasBecomeActive = NO;
     }
 
     // Ensure [iTermController dealloc] is called before prefs are saved
-    [[iTermController sharedInstance] stopEventTap];
+    [[HotkeyWindowController sharedInstance] stopEventTap];
     [iTermController sharedInstanceRelease];
 
     // save preferences
@@ -444,7 +420,7 @@ static BOOL hasBecomeActive = NO;
 
 - (void)applicationWillTerminate:(NSNotification *)aNotification
 {
-    [[iTermController sharedInstance] stopEventTap];
+    [[HotkeyWindowController sharedInstance] stopEventTap];
 }
 
 - (PseudoTerminal *)terminalToOpenFileIn
@@ -539,20 +515,20 @@ static BOOL hasBecomeActive = NO;
     if ([prefPanel hotkey] &&
         [prefPanel hotkeyTogglesWindow]) {
         // The hotkey window is configured.
-        PseudoTerminal* hotkeyTerm = [[iTermController sharedInstance] hotKeyWindow];
+        PseudoTerminal* hotkeyTerm = [[HotkeyWindowController sharedInstance] hotKeyWindow];
         if (hotkeyTerm) {
             // Hide the existing window or open it if enabled by preference.
             if ([[hotkeyTerm window] alphaValue] == 1) {
-                [[iTermController sharedInstance] hideHotKeyWindow:hotkeyTerm];
+                [[HotkeyWindowController sharedInstance] hideHotKeyWindow:hotkeyTerm];
                 return NO;
             } else if ([prefPanel dockIconTogglesWindow]) {
-                [[iTermController sharedInstance] showHotKeyWindow];
+                [[HotkeyWindowController sharedInstance] showHotKeyWindow];
                 return NO;
             }
         } else if ([prefPanel dockIconTogglesWindow]) {
             // No existing hotkey window but preference is to toggle it by dock icon so open a new
             // one.
-            [[iTermController sharedInstance] showHotKeyWindow];
+            [[HotkeyWindowController sharedInstance] showHotKeyWindow];
             return NO;
         }
     }
@@ -584,55 +560,57 @@ static BOOL hasBecomeActive = NO;
 - (id)init
 {
     self = [super init];
+    if (self) {
+        // Add ourselves as an observer for notifications.
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(reloadMenus:)
+                                                     name:@"iTermWindowBecameKey"
+                                                   object:nil];
 
-    // Add ourselves as an observer for notifications.
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(reloadMenus:)
-                                                 name:@"iTermWindowBecameKey"
-                                               object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver: self
+                                                 selector: @selector(updateAddressBookMenu:)
+                                                     name: @"iTermReloadAddressBook"
+                                                   object: nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(updateAddressBookMenu:)
-                                                 name: @"iTermReloadAddressBook"
-                                               object: nil];
+        [[NSNotificationCenter defaultCenter] addObserver: self
+                                                 selector: @selector(buildSessionSubmenu:)
+                                                     name: @"iTermNumberOfSessionsDidChange"
+                                                   object: nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(buildSessionSubmenu:)
-                                                 name: @"iTermNumberOfSessionsDidChange"
-                                               object: nil];
+        [[NSNotificationCenter defaultCenter] addObserver: self
+                                                 selector: @selector(buildSessionSubmenu:)
+                                                     name: @"iTermNameOfSessionDidChange"
+                                                   object: nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(buildSessionSubmenu:)
-                                                 name: @"iTermNameOfSessionDidChange"
-                                               object: nil];
+        [[NSNotificationCenter defaultCenter] addObserver: self
+                                                 selector: @selector(reloadSessionMenus:)
+                                                     name: @"iTermSessionBecameKey"
+                                                   object: nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(reloadSessionMenus:)
-                                                 name: @"iTermSessionBecameKey"
-                                               object: nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(nonTerminalWindowBecameKey:)
+                                                     name:@"nonTerminalWindowBecameKey"
+                                                   object:nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(nonTerminalWindowBecameKey:)
-                                                 name:@"nonTerminalWindowBecameKey"
-                                               object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(windowArrangementsDidChange:)
+                                                     name:@"iTermSavedArrangementChanged"
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(toolDidToggle:)
+                                                     name:@"iTermToolToggled"
+                                                   object:nil];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(windowArrangementsDidChange:)
-                                                 name:@"iTermSavedArrangementChanged"
-                                               object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(toolDidToggle:)
-                                                 name:@"iTermToolToggled"
-                                               object:nil];
+        [[NSAppleEventManager sharedAppleEventManager] setEventHandler:self
+                                                           andSelector:@selector(getUrl:withReplyEvent:)
+                                                         forEventClass:kInternetEventClass
+                                                            andEventID:kAEGetURL];
 
-    [[NSAppleEventManager sharedAppleEventManager] setEventHandler:self
-                                                       andSelector:@selector(getUrl:withReplyEvent:)
-                                                     forEventClass:kInternetEventClass
-                                                        andEventID:kAEGetURL];
-
-    aboutController = nil;
-    launchTime_ = [[NSDate date] retain];
-
+        aboutController = nil;
+        launchTime_ = [[NSDate date] retain];
+        _workspaceSessionActive = YES;
+    }
+    
     return self;
 }
 
@@ -701,6 +679,7 @@ static BOOL hasBecomeActive = NO;
     NSString *theName = [notification object];
     for (PseudoTerminal *term in [[iTermController sharedInstance] terminals]) {
         [[term toolbelt] toggleToolWithName:theName];
+        [term refreshTools];
     }
     NSMenuItem *menuItem = [toolbeltMenu itemWithTitle:theName];
 
@@ -794,7 +773,8 @@ static BOOL hasBecomeActive = NO;
         [[iTermController sharedInstance] launchBookmark:bm
                                               inTerminal:term
                                                  withURL:urlStr
-                                           forObjectType:term ? iTermTabObject : iTermWindowObject];
+                                                isHotkey:NO
+                                                 makeKey:NO];
     }
 }
 
@@ -934,13 +914,22 @@ static BOOL hasBecomeActive = NO;
             return;
         }
     }
-    for (PseudoTerminal* term in [self terminals]) {
-        if ([term isOrderedOut]) {
-            //NSLog(@"term %p was orphaned, order front.", term);
-            [[term window] orderFront:nil];
-        }
+}
+
+- (void)hideToolTipsInView:(NSView *)aView {
+    [aView removeAllToolTips];
+    for (NSView *subview in [aView subviews]) {
+        [self hideToolTipsInView:subview];
     }
 }
+
+- (void)applicationWillHide:(NSNotification *)aNotification
+{
+    for (NSWindow *aWindow in [[NSApplication sharedApplication] windows]) {
+        [self hideToolTipsInView:[aWindow contentView]];
+    }
+}
+
 
 // font control
 - (IBAction)biggerFont: (id) sender
@@ -1037,18 +1026,15 @@ static BOOL hasBecomeActive = NO;
                 defaultDelay:0.125];
 }
 
-static void SwapDebugLog() {
-        NSMutableString* temp;
-        temp = gDebugLogStr;
-        gDebugLogStr = gDebugLogStr2;
-        gDebugLogStr2 = temp;
+- (IBAction)toggleMultiLinePasteWarning:(id)sender {
+    NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+    [userDefaults setBool:![userDefaults boolForKey:kMultiLinePasteWarningUserDefaultsKey]
+                   forKey:kMultiLinePasteWarningUserDefaultsKey];
 }
 
-static void FlushDebugLog() {
-        NSData* data = [gDebugLogStr dataUsingEncoding:NSUTF8StringEncoding];
-        int written = write(gDebugLogFile, [data bytes], [data length]);
-        assert(written == [data length]);
-        [gDebugLogStr setString:@""];
+- (BOOL)warnBeforeMultiLinePaste {
+    NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+    return [userDefaults boolForKey:kMultiLinePasteWarningUserDefaultsKey];
 }
 
 - (IBAction)maximizePane:(id)sender
@@ -1111,52 +1097,12 @@ static void FlushDebugLog() {
 }
 
 // Debug logging
--(IBAction)debugLogging:(id)sender
+- (IBAction)debugLogging:(id)sender
 {
-    if (!gDebugLogging) {
-        NSRunAlertPanel(@"Debug Logging Enabled",
-                        @"Writing to /tmp/debuglog.txt",
-                        @"OK", nil, nil);
-        gDebugLogFile = open("/tmp/debuglog.txt", O_TRUNC | O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
-        gDebugLogStr = [[NSMutableString alloc] init];
-        gDebugLogStr2 = [[NSMutableString alloc] init];
-        gDebugLogging = !gDebugLogging;
-    } else {
-        gDebugLogging = !gDebugLogging;
-        SwapDebugLog();
-        FlushDebugLog();
-        SwapDebugLog();
-        FlushDebugLog();
-        
-        close(gDebugLogFile);
-        gDebugLogFile=-1;
-        NSRunAlertPanel(@"Debug Logging Stopped",
-                        @"Please compress and send /tmp/debuglog.txt to the developers.",
-                        @"OK", nil, nil);
-        [gDebugLogStr release];
-        [gDebugLogStr2 release];
-    }
+  ToggleDebugLogging();
 }
 
-int DebugLogImpl(const char *file, int line, const char *function, NSString* value)
-{
-    if (gDebugLogging) {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-
-        [gDebugLogStr appendFormat:@"%lld.%08lld %s:%d (%s): ", (long long)tv.tv_sec, (long long)tv.tv_usec, file, line, function];
-        [gDebugLogStr appendString:value];
-        [gDebugLogStr appendString:@"\n"];
-        if ([gDebugLogStr length] > 100000000) {
-            SwapDebugLog();
-            [gDebugLogStr2 setString:@""];
-        }
-    }
-    return 1;
-}
-
-/// About window
-
+// About window
 - (NSAttributedString *)_linkTo:(NSString *)urlString title:(NSString *)title
 {
     NSDictionary *linkAttributes = [NSDictionary dictionaryWithObject:[NSURL URLWithString:urlString]
@@ -1354,6 +1300,32 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
                          params:&params];
 }
 
+- (NSMenu *)downloadsMenu
+{
+    if (!downloadsMenu_) {
+        downloadsMenu_ = [[[NSMenuItem alloc] init] autorelease];
+        downloadsMenu_.title = @"Downloads";
+        NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
+        [mainMenu insertItem:downloadsMenu_
+                     atIndex:mainMenu.itemArray.count - 1];
+        [downloadsMenu_ setSubmenu:[[NSMenu alloc] initWithTitle:@"Downloads"]];
+    }
+    return [downloadsMenu_ submenu];
+}
+
+- (NSMenu *)uploadsMenu
+{
+    if (!uploadsMenu_) {
+        uploadsMenu_ = [[[NSMenuItem alloc] init] autorelease];
+        uploadsMenu_.title = @"Uploads";
+        NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
+        [mainMenu insertItem:uploadsMenu_
+                     atIndex:mainMenu.itemArray.count - 1];
+        [uploadsMenu_ setSubmenu:[[NSMenu alloc] initWithTitle:@"Uploads"]];
+    }
+    return [uploadsMenu_ submenu];
+}
+
 // This is called whenever a tab becomes key or logging starts/stops.
 - (void)reloadSessionMenus:(NSNotification *)aNotification
 {
@@ -1423,6 +1395,9 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
             [menuItem setState:[term fullScreenTabControl] ? NSOnState : NSOffState];
             return YES;
         }
+    } else if ([menuItem action] == @selector(toggleMultiLinePasteWarning:)) {
+        menuItem.state = [self warnBeforeMultiLinePaste] ? NSOnState : NSOffState;
+        return YES;
     } else {
         return YES;
     }

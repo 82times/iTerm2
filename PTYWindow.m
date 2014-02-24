@@ -53,7 +53,7 @@
 
 @implementation PTYWindow
 
-- (void) dealloc
+- (void)dealloc
 {
     [restoreState_ release];
 
@@ -80,6 +80,14 @@
     }
 
     return self;
+}
+
+- (NSString *)description
+{
+    return [NSString stringWithFormat:@"<%@: %p frame=%@>",
+            [self class],
+            self,
+            [NSValue valueWithRect:self.frame]];
 }
 
 - (void)encodeRestorableStateWithCoder:(NSCoder *)coder
@@ -113,20 +121,10 @@
         return;
     }
     CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (IsLionOrLater() && function) {
-        // If CGSSetWindowBackgroundBlurRadius() is available (10.6 and up) use it because it works
-        // right in Exposé.
+    if (function) {
         function(con, [self windowNumber], (int)radius);
     } else {
-        // Fall back to 10.5-only method.
-        if (CGSNewCIFilterByName(con, (CFStringRef)@"CIGaussianBlur", &blurFilter)) {
-            return;
-        }
-
-        NSDictionary *optionsDict = [NSDictionary dictionaryWithObject:[NSNumber numberWithFloat:radius] forKey:@"inputRadius"];
-        CGSSetCIFilterValuesFromDictionary(con, blurFilter, (CFDictionaryRef)optionsDict);
-
-        CGSAddWindowFilter(con, [self windowNumber], blurFilter, kCGWindowFilterUnderlay);
+        NSLog(@"Couldn't get blur function");
     }
     blurRadius_ = radius;
 #endif
@@ -144,7 +142,7 @@
     }
 
     CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (IsLionOrLater() && function) {
+    if (function) {
         function(con, [self windowNumber], 0);
     } else if (blurFilter) {
         CGSRemoveWindowFilter(con, (CGSWindowID)[self windowNumber], blurFilter);
@@ -316,8 +314,8 @@
 
 end:
     [windows release];
-    PtyLog(@"set frame to %@", [NSValue valueWithPoint:bestFrame.origin]);
-    [super setFrameOrigin:bestFrame.origin];
+    PtyLog(@"set frame origin to %@", [NSValue valueWithPoint:bestFrame.origin]);
+    [self setFrameOrigin:bestFrame.origin];
 }
 
 - (void)setLayoutDone

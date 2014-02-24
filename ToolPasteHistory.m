@@ -10,6 +10,7 @@
 #import "NSDateFormatterExtras.h"
 #import "iTermController.h"
 #import "ToolWrapper.h"
+#import "PseudoTerminal.h"
 
 static const CGFloat kButtonHeight = 23;
 static const CGFloat kMargin = 4;
@@ -159,6 +160,11 @@ static const CGFloat kMargin = 4;
     [tableView_ reloadData];
     // Updating the table data causes the cursor to change into an arrow!
     [self performSelector:@selector(fixCursor) withObject:nil afterDelay:0];
+}
+
+- (CGFloat)minimumHeight
+{
+    return 60;
 }
 
 @end

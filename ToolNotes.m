@@ -7,7 +7,7 @@
 //
 
 #import "ToolNotes.h"
-#import "NSFileManager+DirectoryLocations.h"
+#import "NSFileManager+iTerm.h"
 
 static NSString *kToolNotesSetTextNotification = @"kToolNotesSetTextNotification";
 
@@ -87,6 +87,11 @@ static NSString *kToolNotesSetTextNotification = @"kToolNotesSetTextNotification
 }
 
 - (void)shutdown {
+}
+
+- (CGFloat)minimumHeight
+{
+    return 15;
 }
 
 @end

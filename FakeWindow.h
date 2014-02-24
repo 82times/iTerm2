@@ -21,7 +21,7 @@
     BOOL isMiniaturized;
     NSRect frame;
     NSScreen* screen;
-    PseudoTerminal* realWindow;
+    NSWindowController<iTermWindowController> * realWindow;
 
     // Changes the session has initiated that will be delayed and performed
     // in -[rejoin:].
@@ -37,42 +37,14 @@
     BOOL hasPendingResetTempTitle;
 
     NSColor* pendingLabelColor;
-    NSColor* pendingTabColor;
     BOOL scrollbarShouldBeVisible;
 }
 
-- (id)initFromRealWindow:(PseudoTerminal*)aTerm session:(PTYSession*)aSession;
+- (id)initFromRealWindow:(NSWindowController<iTermWindowController> *)aTerm
+                 session:(PTYSession*)aSession;
 - (void)dealloc;
 
 // PseudoTerminal should call this after adding the session to its tab view.
-- (void)rejoin:(PseudoTerminal*)aTerm;
-
-- (void)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height;
-- (BOOL)fullScreen;
-- (BOOL)anyFullScreen;
-- (void)closeSession:(PTYSession*)aSession;
-- (IBAction)nextTab:(id)sender;
-- (IBAction)previousTab:(id)sender;
-- (void)setLabelColor:(NSColor *)color forTabViewItem:tabViewItem;
-- (void)setTabColor:(NSColor *)color forTabViewItem:tabViewItem;
-- (NSColor*)tabColorForTabViewItem:(NSTabViewItem*)tabViewItem;
-- (void)enableBlur:(double)radius;
-- (void)disableBlur;
-- (BOOL)tempTitle;
-- (PTYTabView *)tabView;
-- (PTYSession *)currentSession;
-- (void)setWindowTitle;
-- (void)resetTempTitle;
-- (PTYTab*)currentTab;
-
-- (void)windowSetFrameTopLeftPoint:(NSPoint)point;
-- (void)windowPerformMiniaturize:(id)sender;
-- (void)windowDeminiaturize:(id)sender;
-- (void)windowOrderFront:(id)sender;
-- (void)windowOrderBack:(id)sender;
-- (BOOL)windowIsMiniaturized;
-- (NSRect)windowFrame;
-- (NSScreen*)windowScreen;
-- (BOOL)scrollbarShouldBeVisible;
+- (void)rejoin:(NSWindowController<iTermWindowController> *)aTerm;
 
 @end

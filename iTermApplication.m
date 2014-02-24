@@ -29,29 +29,17 @@
  */
 
 #import "iTermApplication.h"
-#import "iTermController.h"
-#import "PTYWindow.h"
-#import "PseudoTerminal.h"
+#import "HotkeyWindowController.h"
+#import "NSTextField+iTerm.h"
 #import "PTYSession.h"
-#import "PreferencePanel.h"
 #import "PTYTextView.h"
+#import "PTYWindow.h"
+#import "PreferencePanel.h"
+#import "PseudoTerminal.h"
+#import "iTermController.h"
 #import "iTermKeyBindingMgr.h"
 
 @implementation iTermApplication
-
-+ (BOOL)isTextFieldInFocus:(NSTextField *)textField
-{
-    BOOL inFocus = NO;
-
-    // If the textfield's widow's first responder is a text view and
-    // the default editor for the text field exists and
-    // the textfield is the textfield's window's first responder's delegate
-    inFocus = ([[[textField window] firstResponder] isKindOfClass:[NSTextView class]]
-               && [[textField window] fieldEditor:NO forObject:nil]!=nil
-               && [textField isEqualTo:(id)[(NSTextView *)[[textField window] firstResponder]delegate]]);
-
-    return inFocus;
-}
 
 - (BOOL)_eventUsesNavigationKeys:(NSEvent*)event
 {
@@ -88,15 +76,15 @@
         }
 #endif
         PreferencePanel* prefPanel = [PreferencePanel sharedInstance];
-        if ([prefPanel isAnyModifierRemapped] && 
-            (IsSecureEventInputEnabled() || ![cont haveEventTap])) {
+        if ([prefPanel isAnyModifierRemapped] &&
+            (IsSecureEventInputEnabled() || ![[HotkeyWindowController sharedInstance] haveEventTap])) {
             // The event tap is not working, but we can still remap modifiers for non-system
             // keys. Only things like cmd-tab will not be remapped in this case. Otherwise,
             // the event tap performs the remapping.
             event = [iTermKeyBindingMgr remapModifiers:event prefPanel:prefPanel];
         }
         if (IsSecureEventInputEnabled() &&
-            [cont eventIsHotkey:event]) {
+            [[HotkeyWindowController sharedInstance] eventIsHotkey:event]) {
             // User pressed the hotkey while secure input is enabled so the event
             // tap won't get it. Do what the event tap would do in this case.
             OnHotKeyEvent();
@@ -118,7 +106,7 @@
                 PseudoTerminal* termWithNumber = [cont terminalWithNumber:(digit - 1)];
                 if (termWithNumber) {
                     if ([termWithNumber isHotKeyWindow] && [[termWithNumber window] alphaValue] < 1) {
-                        [[iTermController sharedInstance] showHotKeyWindow];
+                        [[HotkeyWindowController sharedInstance] showHotKeyWindow];
                     } else {
                         [[termWithNumber window] makeKeyAndOrderFront:self];
                     }
@@ -128,18 +116,18 @@
         }
         if ([prefPanel keySheet] == [self keyWindow] &&
             [prefPanel keySheetIsOpen] &&
-            [iTermApplication isTextFieldInFocus:[prefPanel shortcutKeyTextField]]) {
+            [[prefPanel shortcutKeyTextField] textFieldIsFirstResponder]) {
             // Focus is in the shortcut field in prefspanel. Pass events directly to it.
             [prefPanel shortcutKeyDown:event];
             return;
         } else if ([privatePrefPanel keySheet] == [self keyWindow] &&
                    [privatePrefPanel keySheetIsOpen] &&
-                   [iTermApplication isTextFieldInFocus:[privatePrefPanel shortcutKeyTextField]]) {
+                   [[privatePrefPanel shortcutKeyTextField] textFieldIsFirstResponder]) {
             // Focus is in the shortcut field in sessions prefspanel. Pass events directly to it.
             [privatePrefPanel shortcutKeyDown:event];
             return;
         } else if ([prefPanel window] == [self keyWindow] &&
-                   [iTermApplication isTextFieldInFocus:[prefPanel hotkeyField]]) {
+                   [[prefPanel hotkeyField] textFieldIsFirstResponder]) {
             // Focus is in the hotkey field in prefspanel. Pass events directly to it.
             [prefPanel hotkeyKeyDown:event];
             return;

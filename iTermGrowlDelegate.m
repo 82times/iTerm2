@@ -29,13 +29,13 @@
  */
 
 #import "iTermGrowlDelegate.h"
-#import "PreferencePanel.h"
+#import "Growl.framework/Headers/GrowlApplicationBridge.h"
+#import "HotkeyWindowController.h"
 #import "PTYSession.h"
 #import "PTYTab.h"
-#import "iTermController.h"
+#import "PreferencePanel.h"
 #import "PseudoTerminal.h"
-#import "Growl.framework/Headers/GrowlApplicationBridge.h"
-#import "SessionView.h"
+#import "iTermController.h"
 
 /**
  **  The category is used to extend iTermGrowlDelegate with private methods.
@@ -75,7 +75,10 @@
             NSLog(@"Could not load Growl.framework");
         }
 
-//        [GrowlApplicationBridge setGrowlDelegate:self];
+        if (IsMountainLionOrLater()) {
+            [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:self];
+        }
+
         [self registrationDictionaryForGrowl];
         [self setEnabled:YES];
 
@@ -125,39 +128,49 @@
       [self growlNotify:title
         withDescription:description
         andNotification:notification
-             andSession:nil];
+            windowIndex:-1
+               tabIndex:-1
+              viewIndex:-1];
 }
 
-- (void)growlNotify:(NSString *)title
+- (BOOL)growlNotify:(NSString *)title
     withDescription:(NSString *)description
     andNotification:(NSString *)notification
-         andSession:(PTYSession *)session
+        windowIndex:(int)windowIndex
+           tabIndex:(int)tabIndex
+          viewIndex:(int)viewIndex
 {
-    if (![self isEnabled]) {
-        return;
-    }
 
     NSDictionary *context = nil;
-    if (session) {
-      context = [[[NSDictionary alloc] initWithObjectsAndKeys:
-                     [NSNumber numberWithInt:[[iTermController sharedInstance] indexOfTerminal:[[session tab] realParentWindow]]],
-                     @"win",
-                     [NSNumber numberWithInt:[[session tab] number]],
-                     @"tab",
-                     [NSNumber numberWithInt:[[session view] viewId]],
-                     @"view",
-                     nil] autorelease];
+    if (windowIndex >= 0) {
+        context = @{ @"win": @(windowIndex),
+                     @"tab": @(tabIndex),
+                     @"view": @(viewIndex) };
     }
 
     if ([[PreferencePanel sharedInstance] enableGrowl]) {
-        [GrowlApplicationBridge notifyWithTitle:title
-                                    description:description
-                               notificationName:notification
-                                       iconData:nil
-                                       priority:0
-                                       isSticky:NO
-                                   clickContext:context];
+        if ([self isEnabled]) {
+            [GrowlApplicationBridge notifyWithTitle:title
+                                        description:description
+                                   notificationName:notification
+                                           iconData:nil
+                                           priority:0
+                                           isSticky:NO
+                                       clickContext:context];
+            return YES;
+        } else if (IsMountainLionOrLater()) {
+            // Fall back to notification center.
+            NSUserNotification *notification = [[[NSUserNotification alloc] init] autorelease];
+            notification.title = title;
+            notification.informativeText = description;
+            notification.soundName = nil;
+            notification.userInfo = context;
+            [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
+            return YES;
+        }
     }
+
+    return NO;
 }
 
 - (void)growlNotificationWasClicked:(id)clickContext
@@ -177,21 +190,9 @@
         NSBeep();
         return;
     }
-
-    if ([terminal isHotKeyWindow]) {
-        [controller showHotKeyWindow];
-    } else {
-        [controller setCurrentTerminal:terminal];
-        [[terminal window] makeKeyAndOrderFront:self];
-        [tabView selectTabViewItemAtIndex:tab];
-    }
-    [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-
-    PTYTab *theTab = [terminal currentTab];
+    PTYTab *theTab = [[tabView tabViewItemAtIndex:tab] identifier];
     PTYSession *theSession = [theTab sessionWithViewId:view];
-    if (theSession) {
-        [theTab setActiveSession:theSession];
-    }
+    [theSession reveal];
 }
 
 - (NSDictionary *)registrationDictionaryForGrowl
@@ -208,6 +209,20 @@
 - (void) growlIsReady
 {
     NSLog(@"Growl is ready");
+}
+
+#pragma mark - NSUserNotificationCenterDelegate
+
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center
+     shouldPresentNotification:(NSUserNotification *)notification
+{
+    return YES;
+}
+
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center
+       didActivateNotification:(NSUserNotification *)notification
+{
+    [self growlNotificationWasClicked:notification.userInfo];
 }
 
 @end

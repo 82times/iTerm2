@@ -1,43 +1,13 @@
-// -*- mode:objc -*-
-/*
- **  PTYTab.h
- **
- **  Copyright (c) 2010
- **
- **  Author: George Nachman
- **
- **  Project: iTerm2
- **
- **  Description: PTYTab abstracts the concept of a tab. This is
- **  attached to the tabview's identifier and is the owner of
- **  PTYSession.
- **
- **  This program is free software; you can redistribute it and/or modify
- **  it under the terms of the GNU General Public License as published by
- **  the Free Software Foundation; either version 2 of the License, or
- **  (at your option) any later version.
- **
- **  This program is distributed in the hope that it will be useful,
- **  but WITHOUT ANY WARRANTY; without even the implied warranty of
- **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- **  GNU General Public License for more details.
- **
- **  You should have received a copy of the GNU General Public License
- **  along with this program; if not, write to the Free Software
- **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
+// PTYTab abstracts the concept of a tab. This is attached to the tabview's identifier and is the
+// owner of PTYSession.
 
 #import <Cocoa/Cocoa.h>
 #import "WindowControllerInterface.h"
+#import "PSMTabBarControl.h"
 #import "PTYSplitView.h"
 #import "FutureMethods.h"
 
-static const int MIN_SESSION_ROWS = 2;
-static const int MIN_SESSION_COLUMNS = 2;
-
 @class PTYSession;
-@class PseudoTerminal;
 @class FakeWindow;
 @class SessionView;
 @class TmuxController;
@@ -45,14 +15,18 @@ static const int MIN_SESSION_COLUMNS = 2;
 
 // This implements NSSplitViewDelegate but it was an informal protocol in 10.5. If 10.5 support
 // is eventually dropped, change this to make it official.
-@interface PTYTab : NSObject <NSSplitViewDelegate, PTYSplitViewDelegate> {
+@interface PTYTab : NSObject <
+  NSCopying,
+  NSSplitViewDelegate,
+  PTYSplitViewDelegate,
+  PSMTabBarControlRepresentedObjectIdentifierProtocol> {
     PTYSession* activeSession_;
 
     // Owning tab view item
     NSTabViewItem* tabViewItem_;
 
     id<WindowControllerInterface> parentWindow_;  // Parent controller. Always set. Equals one of realParent or fakeParent.
-    PseudoTerminal* realParentWindow_;  // non-nil only if parent is PseudoTerminal*
+    NSWindowController<iTermWindowController> *realParentWindow_;  // non-nil only if parent is PseudoTerminal*. Implements optional methods of protocol.
     FakeWindow* fakeParentWindow_;  // non-nil only if parent is FakeWindow*
 
     // The tab number that is observed by PSMTabBarControl.
@@ -144,14 +118,11 @@ static const int MIN_SESSION_COLUMNS = 2;
 - (int)indexOfSessionView:(SessionView*)sessionView;
 
 - (void)setLockedSession:(PTYSession*)lockedSession;
-- (PTYSession*)activeSession;
 - (id<WindowControllerInterface>)parentWindow;
-- (PseudoTerminal*)realParentWindow;
-- (void)setParentWindow:(PseudoTerminal*)theParent;
+- (NSWindowController<iTermWindowController> *)realParentWindow;
+- (void)setParentWindow:(NSWindowController<iTermWindowController> *)theParent;
 - (void)setFakeParentWindow:(FakeWindow*)theParent;
 - (FakeWindow*)fakeWindow;
-- (NSTabViewItem *)tabViewItem;
-- (void)setTabViewItem: (NSTabViewItem *)theTabViewItem;
 
 - (void)setBell:(BOOL)flag;
 - (void)nameOfSession:(PTYSession*)session didChangeTo:(NSString*)newName;
@@ -230,7 +201,9 @@ static const int MIN_SESSION_COLUMNS = 2;
 - (PTYSession*)_recursiveSessionAtPoint:(NSPoint)point relativeTo:(NSView*)node;
 
 + (void)drawArrangementPreview:(NSDictionary*)arrangement frame:(NSRect)frame;
-+ (PTYTab *)openTabWithArrangement:(NSDictionary*)arrangement inTerminal:(PseudoTerminal*)term hasFlexibleView:(BOOL)hasFlexible;
++ (PTYTab *)openTabWithArrangement:(NSDictionary*)arrangement
+                        inTerminal:(id<WindowControllerInterface>)term
+                   hasFlexibleView:(BOOL)hasFlexible;
 - (void)updateFlexibleViewColors;
 - (NSDictionary*)arrangement;
 
@@ -250,7 +223,7 @@ static const int MIN_SESSION_COLUMNS = 2;
                       forNewLayout:(NSMutableDictionary *)parseTree;
 - (void)reloadTmuxLayout;
 + (PTYTab *)openTabWithTmuxLayout:(NSMutableDictionary *)parseTree
-                       inTerminal:(PseudoTerminal *)term
+                       inTerminal:(NSWindowController<iTermWindowController> *)term
                        tmuxWindow:(int)tmuxWindow
                    tmuxController:(TmuxController *)tmuxController;
 + (void)setTmuxFont:(NSFont *)font
@@ -273,6 +246,9 @@ static const int MIN_SESSION_COLUMNS = 2;
 - (BOOL)layoutIsTooLarge;
 - (TmuxController *)tmuxController;
 
+- (void)moveCurrentSessionDividerBy:(int)direction horizontally:(BOOL)horizontally;
+- (BOOL)canMoveCurrentSessionDividerBy:(int)direction horizontally:(BOOL)horizontally;
+
 #pragma mark NSSplitView delegate methods
 - (void)splitViewDidResizeSubviews:(NSNotification *)aNotification;
 // This is the implementation of splitViewDidResizeSubviews. The delegate method isn't called when
@@ -280,15 +256,5 @@ static const int MIN_SESSION_COLUMNS = 2;
 - (void)_splitViewDidResizeSubviews:(NSSplitView*)splitView;
 - (CGFloat)splitView:(NSSplitView *)splitView constrainSplitPosition:(CGFloat)proposedPosition ofSubviewAt:(NSInteger)dividerIndex;
 - (void)_recursiveRemoveView:(NSView*)theView;
-
-@end
-
-
-@interface PTYTab (Private)
-
-- (void)_setLabelAttributesForDeadSession;
-- (void)_setLabelAttributesForForegroundTab;
-- (void)_setLabelAttributesForActiveBackgroundTab;
-- (void)_setLabelAttributesForIdleBackgroundTabAtTime:(struct timeval)now;
 
 @end

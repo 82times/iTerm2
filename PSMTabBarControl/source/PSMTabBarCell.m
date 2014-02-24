@@ -105,6 +105,10 @@
     return _controlView;
 }
 
+- (id<PSMTabBarControlProtocol>)psmTabControlView {
+    return (id<PSMTabBarControlProtocol>)_controlView;
+}
+
 - (void)setControlView:(id)view
 {
     // no retain release pattern, as this simply switches a tab to another view.
@@ -380,7 +384,6 @@
 - (NSImage *)dragImage
 {
     NSRect cellFrame = [(id <PSMTabStyle>)[(PSMTabBarControl *)_controlView style] dragRectForTabCell:self orientation:[(PSMTabBarControl *)_controlView orientation]];
-    //NSRect cellFrame = [self frame];
 
     [_controlView lockFocus];
     NSBitmapImageRep *rep = [[[NSBitmapImageRep alloc] initWithFocusedViewRect:cellFrame] autorelease];
@@ -489,7 +492,7 @@
     } else if ([attribute isEqualToString:NSAccessibilityPositionAttribute] || [attribute isEqualToString:NSAccessibilitySizeAttribute]) {
         NSRect rect = [self frame];
         rect = [[self controlView] convertRect:rect toView:nil];
-        rect = [[self controlView] futureConvertRectToScreen:rect];
+        rect = [[self controlView] convertRectToScreen:rect];
         if ([attribute isEqualToString:NSAccessibilityPositionAttribute]) {
             attributeValue = [NSValue valueWithPoint:rect.origin];
         } else {
@@ -528,7 +531,8 @@
 - (void)accessibilityPerformAction:(NSString *)action {
     if ([action isEqualToString:NSAccessibilityPressAction]) {
         // this tab was selected
-        [_controlView performSelector:@selector(tabClick:) withObject:self];
+        [[self psmTabControlView] performSelector:@selector(tabClick:)
+                                       withObject:self];
     }
 }
 

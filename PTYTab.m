@@ -1,32 +1,3 @@
-// -*- mode:objc -*-
-/*
- **  PTYTab.m
- **
- **  Copyright (c) 2010
- **
- **  Author: George Nachman
- **
- **  Project: iTerm2
- **
- **  Description: PTYTab abstracts the concept of a tab. This is
- **  attached to the tabview's identifier and is the owner of
- **  PTYSession.
- **
- **  This program is free software; you can redistribute it and/or modify
- **  it under the terms of the GNU General Public License as published by
- **  the Free Software Foundation; either version 2 of the License, or
- **  (at your option) any later version.
- **
- **  This program is distributed in the hope that it will be useful,
- **  but WITHOUT ANY WARRANTY; without even the implied warranty of
- **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- **  GNU General Public License for more details.
- **
- **  You should have received a copy of the GNU General Public License
- **  along with this program; if not, write to the Free Software
- **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #import "PTYTab.h"
 #import "PTYSession.h"
 #import "WindowControllerInterface.h"
@@ -45,17 +16,7 @@
 #import "IntervalMap.h"
 #import "TmuxDashboardController.h"
 
-//#define PTYTAB_VERBOSE_LOGGING
-#ifdef PTYTAB_VERBOSE_LOGGING
-#define PtyLog NSLog
-#else
-#define PtyLog(args...) \
-do { \
-if (gDebugLogging) { \
-DebugLog([NSString stringWithFormat:args]); \
-} \
-} while (0)
-#endif
+#define PtyLog DLog
 
 // No growl output/idle alerts for a few seconds after a window is resized because there will be bogus bg activity
 const int POST_WINDOW_RESIZE_SILENCE_SEC = 5;
@@ -146,7 +107,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     if ([self updatePaneTitles] && [self isTmuxTab]) {
         [tmuxController_ windowDidResize:realParentWindow_];
     }
-    [realParentWindow_ futureInvalidateRestorableState];
+    [realParentWindow_ invalidateRestorableState];
 }
 
 - (void)appendSessionViewToViewOrder:(SessionView*)sessionView
@@ -197,6 +158,14 @@ static const BOOL USE_THIN_SPLITTERS = YES;
                                                  name:@"iTermUpdateLabels"
                                                object:nil];
     return self;
+}
+
+- (id)copyWithZone:(NSZone *)zone {
+    NSDictionary *arrangement = [self arrangement];
+    PTYTab *theCopy = [PTYTab tabWithArrangement:arrangement
+                                      inTerminal:[self realParentWindow]
+                                 hasFlexibleView:flexibleView_ != nil];
+    return [theCopy retain];
 }
 
 + (void)_recursiveSetDelegateIn:(NSSplitView*)node to:(id)delegate
@@ -368,7 +337,13 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     }
 
     --preserveOrder_;
-    [realParentWindow_ futureInvalidateRestorableState];
+    [realParentWindow_ invalidateRestorableState];
+
+    if (changed) {
+        [[self realParentWindow] tabActiveSessionDidChange];
+    }
+    
+    [[self realParentWindow] updateTabColors];
 }
 
 - (void)setActiveSession:(PTYSession*)session
@@ -488,7 +463,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return parentWindow_;
 }
 
-- (PseudoTerminal*)realParentWindow
+- (NSWindowController<iTermWindowController> *)realParentWindow
 {
     return realParentWindow_;
 }
@@ -539,7 +514,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     }
 }
 
-- (void)setParentWindow:(PseudoTerminal*)theParent
+- (void)setParentWindow:(NSWindowController<iTermWindowController> *)theParent
 {
     // Parent holds a reference to us (indirectly) so we mustn't reference it.
     parentWindow_ = realParentWindow_ = theParent;
@@ -1384,8 +1359,8 @@ static NSString* FormatRect(NSRect r) {
 {
     NSSize size;
     PTYSession* session = [sessionView session];
-    size.width = MIN_SESSION_COLUMNS * [[session TEXTVIEW] charWidth] + MARGIN * 2;
-    size.height = MIN_SESSION_ROWS * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
+    size.width = kVT100ScreenMinColumns * [[session TEXTVIEW] charWidth] + MARGIN * 2;
+    size.height = kVT100ScreenMinRows * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
 
     BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
     NSSize scrollViewSize =
@@ -1758,6 +1733,7 @@ static NSString* FormatRect(NSRect r) {
     BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
     [[aSession SCROLLVIEW] setHasVerticalScroller:hasScrollbar];
     NSSize size = [[aSession view] maximumPossibleScrollViewContentSize];
+    DLog(@"Max size is %@", [NSValue valueWithSize:size]);
     int width = (size.width - MARGIN*2) / [[aSession TEXTVIEW] charWidth];
     int height = (size.height - VMARGIN*2) / [[aSession TEXTVIEW] lineHeight];
     PtyLog(@"fitSessionToCurrentViewSize %@ gives %d rows", [NSValue valueWithSize:size], height);
@@ -1778,6 +1754,7 @@ static NSString* FormatRect(NSRect r) {
 // containing view.
 - (BOOL)fitSessionToCurrentViewSize:(PTYSession*)aSession
 {
+    DLog(@"fitSessionToCurrentViewSize:%@", aSession);
     if ([aSession isTmuxClient]) {
         return NO;
     }
@@ -2162,7 +2139,7 @@ static NSString* FormatRect(NSRect r) {
 }
 
 + (PTYTab *)tabWithArrangement:(NSDictionary*)arrangement
-                    inTerminal:(PseudoTerminal*)term
+                    inTerminal:(NSWindowController<iTermWindowController> *)term
                hasFlexibleView:(BOOL)hasFlexible
 {
     PTYTab* theTab;
@@ -2196,7 +2173,8 @@ static NSString* FormatRect(NSRect r) {
 
 // This can only be used in conjunction with
 // +[tabWithArrangement:inTerminal:hasFlexibleView:].
- - (void)addToTerminal:(PseudoTerminal *)term withArrangement:(NSDictionary *)arrangement
+ - (void)addToTerminal:(NSWindowController<iTermWindowController> *)term
+       withArrangement:(NSDictionary *)arrangement
 {
     // Add the existing tab, which is now fully populated, to the term.
     [term appendTab:self];
@@ -2209,17 +2187,11 @@ static NSString* FormatRect(NSRect r) {
 
     [self numberOfSessionsDidChange];
     [term setDimmingForSessions];
-
-    NSColor *tabColor;
-    NSString *colorName = [arrangement objectForKey:TAB_ARRANGEMENT_COLOR];
-    tabColor = [[self class] colorForHtmlName:colorName];
-    if (tabColor) {
-        [term setTabColor:tabColor forTabViewItem:tabViewItem_];
-    }
+    [term updateTabColors];
 }
 
 + (PTYTab *)openTabWithArrangement:(NSDictionary*)arrangement
-                        inTerminal:(PseudoTerminal*)term
+                        inTerminal:(NSWindowController<iTermWindowController> *)term
                    hasFlexibleView:(BOOL)hasFlexible
 {
     PTYTab *theTab = [PTYTab tabWithArrangement:arrangement
@@ -2257,7 +2229,7 @@ static NSString* FormatRect(NSRect r) {
 + (NSSize)_recursiveSetSizesInTmuxParseTree:(NSMutableDictionary *)parseTree
                                  showTitles:(BOOL)showTitles
                                    bookmark:(Profile *)bookmark
-                                 inTerminal:(PseudoTerminal *)term
+                                 inTerminal:(NSWindowController<iTermWindowController> *)term
 {
     double splitterSize = 1;  // hack: should use -[NSSplitView dividerThickness], but don't have an instance yet.
     NSSize totalSize = NSZeroSize;
@@ -2445,7 +2417,7 @@ static NSString* FormatRect(NSRect r) {
 }
 
 + (void)setSizesInTmuxParseTree:(NSMutableDictionary *)parseTree
-                     inTerminal:(PseudoTerminal *)term
+                     inTerminal:(NSWindowController<iTermWindowController> *)term
 {
     Profile *bookmark = [PTYTab tmuxBookmark];
 
@@ -2486,7 +2458,7 @@ static NSString* FormatRect(NSRect r) {
 }
 
 + (PTYTab *)openTabWithTmuxLayout:(NSMutableDictionary *)parseTree
-                       inTerminal:(PseudoTerminal *)term
+                       inTerminal:(NSWindowController<iTermWindowController> *)term
                        tmuxWindow:(int)tmuxWindow
                    tmuxController:(TmuxController *)tmuxController
 {
@@ -2959,7 +2931,7 @@ static NSString* FormatRect(NSRect r) {
     [temp release];
 
     [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
-    [realParentWindow_ futureInvalidateRestorableState];
+    [realParentWindow_ invalidateRestorableState];
 }
 
 - (void)unmaximize
@@ -2992,7 +2964,7 @@ static NSString* FormatRect(NSRect r) {
     isMaximized_ = NO;
 
     [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
-    [realParentWindow_ futureInvalidateRestorableState];
+    [realParentWindow_ invalidateRestorableState];
 }
 
 - (BOOL)promptOnClose
@@ -3005,6 +2977,149 @@ static NSString* FormatRect(NSRect r) {
     return NO;
 }
 
+- (BOOL)canMoveCurrentSessionDividerBy:(int)direction horizontally:(BOOL)horizontally
+{
+    SessionView *view = [[self activeSession] view];
+    PTYSplitView *split = (PTYSplitView *)[view superview];
+    if (horizontally) {
+        if ([split isVertical]) {
+            return [self canMoveView:view inSplit:split horizontally:YES by:direction];
+        } else {
+            return [self canMoveView:split inSplit:[split superview] horizontally:YES by:direction];
+        }
+    } else {
+        if ([split isVertical]) {
+            return [self canMoveView:split inSplit:[split superview] horizontally:NO by:direction];
+        } else {
+            return [self canMoveView:view inSplit:split horizontally:NO by:direction];
+        }
+    }
+}
+
+- (void)moveCurrentSessionDividerBy:(int)direction horizontally:(BOOL)horizontally
+{
+    SessionView *view = [[self activeSession] view];
+    PTYSplitView *split = (PTYSplitView *)[view superview];
+    // Either adjust the superview of the active session's view or the
+    // superview of the superview of the current session's view. If you're
+    // trying to resize horizontally and the active view is inside a split view
+    // with horizontal dividers, for example, the split view that needs to
+    // change is actually the view's grandparent.
+    if (horizontally) {
+        if ([split isVertical]) {
+            [self moveView:view inSplit:split horizontally:YES by:direction];
+        } else {
+            [self moveView:split inSplit:[split superview] horizontally:YES by:direction];
+        }
+    } else {
+        if ([split isVertical]) {
+            [self moveView:split inSplit:[split superview] horizontally:NO by:direction];
+        } else {
+            [self moveView:view inSplit:split horizontally:NO by:direction];
+        }
+    }
+}
+
+// This computes what to do and returns a block that actually does it. But if
+// it's not allowed, then it returns null. This combines the "can move" with
+// the "move" into a single function.
+- (void (^)())blockToMoveView:(NSView *)view
+                      inSplit:(NSView *)possibleSplit
+                 horizontally:(BOOL)horizontally
+                           by:(int)direction {
+    if (![possibleSplit isKindOfClass:[PTYSplitView class]] ||
+        possibleSplit.subviews.count == 1) {
+        return NULL;
+    }
+
+    // Compute the index of the passed-in view and divider that are affected.
+    PTYSplitView *split = (PTYSplitView *)possibleSplit;
+    assert(([split isVertical] && horizontally) ||
+           (![split isVertical] && !horizontally));
+    NSUInteger subviewIndex = [[split subviews] indexOfObject:view];
+    if (subviewIndex == NSNotFound) {
+        return NULL;
+    }
+    NSArray *subviews = [split subviews];
+    int numSubviews = [subviews count];
+    int splitterIndex;
+    if (subviewIndex + 1 == numSubviews) {
+        splitterIndex = numSubviews - 2;
+    } else {
+        splitterIndex = subviewIndex;
+    }
+
+    // Compute the new frames for the subview before and after the divider.
+    // No other subviews are affected.
+    NSSize movement = NSMakeSize(horizontally ? direction : 0,
+                                 horizontally ? 0 : direction);
+
+    NSView *before = subviews[splitterIndex];
+    NSRect beforeFrame = before.frame;
+    beforeFrame.size.width += movement.width;
+    beforeFrame.size.height += movement.height;
+
+    NSView *after = subviews[splitterIndex + 1];
+    NSRect afterFrame = after.frame;
+    afterFrame.size.width -= movement.width;
+    afterFrame.size.height -= movement.height;
+    afterFrame.origin.x -= movement.width;
+    afterFrame.origin.y -= movement.height;
+
+    // See if any constraint would be violated.
+    CGFloat proposed = [self _positionOfDivider:splitterIndex inSplitView:split];
+    proposed += (horizontally ? movement.width : movement.height);
+
+    CGFloat constraint = [self splitView:split
+                  constrainMinCoordinate:proposed
+                             ofSubviewAt:splitterIndex];
+    if (constraint > proposed) {
+        return NULL;
+    }
+
+    proposed = [self _positionOfDivider:splitterIndex inSplitView:split];
+    proposed += (horizontally ? movement.width : movement.height);
+    proposed -= [split dividerThickness];
+    constraint = [self splitView:split constrainMaxCoordinate:proposed ofSubviewAt:splitterIndex];
+    if (constraint < proposed) {
+        return NULL;
+    }
+
+    // It would be ok to move the divider. Return a block that updates views' frames.
+    void (^block)() = ^void() {
+        [self splitView:split draggingWillBeginOfSplit:splitterIndex];
+        before.frame = beforeFrame;
+        after.frame = afterFrame;
+        [self splitView:split draggingDidEndOfSplit:splitterIndex pixels:movement];
+        [split setNeedsDisplay:YES];
+    };
+    return [[block copy] autorelease];
+}
+
+- (void)moveView:(NSView *)view
+         inSplit:(NSView *)possibleSplit
+    horizontally:(BOOL)horizontally
+              by:(int)direction {
+    void (^block)() = [self blockToMoveView:view
+                                    inSplit:possibleSplit
+                               horizontally:horizontally
+                                         by:direction];
+    if (block) {
+        block();
+    }
+}
+
+- (BOOL)canMoveView:(NSView *)view
+            inSplit:(NSView *)possibleSplit
+       horizontally:(BOOL)horizontally
+                 by:(int)direction {
+    void (^block)() = [self blockToMoveView:view
+                                    inSplit:possibleSplit
+                               horizontally:horizontally
+                                         by:direction];
+    return block != nil;
+}
+
 #pragma mark NSSplitView delegate methods
 
 - (void)splitView:(PTYSplitView *)splitView draggingWillBeginOfSplit:(int)splitterIndex
@@ -3013,10 +3128,10 @@ static NSString* FormatRect(NSRect r) {
         // Don't care for non-tmux tabs.
         return;
     }
-        // Dragging looks a lot better if we turn on resizing subviews temporarily.
-        for (SessionView *sv in [self sessionViews]) {
-                [sv setAutoresizesSubviews:YES];
-        }
+    // Dragging looks a lot better if we turn on resizing subviews temporarily.
+    for (SessionView *sv in [self sessionViews]) {
+            [sv setAutoresizesSubviews:YES];
+    }
 }
 
 - (void)splitView:(PTYSplitView *)splitView draggingDidEndOfSplit:(int)splitterIndex pixels:(NSSize)pxMoved
@@ -3764,9 +3879,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     return originalPosition + allowedDiff;
 }
 
-@end
-
-@implementation PTYTab (Private)
+#pragma mark - Private
 
 - (void)_setLabelAttributesForDeadSession
 {
@@ -3794,7 +3907,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         if ([session newOutput]) {
             // Idle after new output
             if (![session growlIdle] &&
-                [[session SCREEN] growl] &&
+                [[session SCREEN] postGrowlNotifications] &&
                 [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC &&
                 now.tv_sec > [session lastOutput].tv_sec + 1) {
                 [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"Idle",
@@ -3808,7 +3921,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                                                   [[self activeSession] name],
                                                                   [self realObjectCount]]
                                                  andNotification:@"Idle"
-                                                      andSession:session];
+                                                     windowIndex:[session screenWindowIndex]
+                                                        tabIndex:[session screenTabIndex]
+                                                       viewIndex:[session screenViewIndex]];
                 [session setGrowlIdle:YES];
                 [session setGrowlNewOutput:NO];
             }
@@ -3831,7 +3946,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
 
     if (![[self activeSession] growlNewOutput] &&
         [[self realParentWindow] broadcastMode] == BROADCAST_OFF &&
-        [[[self activeSession] SCREEN] growl] &&
+        [[[self activeSession] SCREEN] postGrowlNotifications] &&
         [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC) {
         [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"New Output",
                                                                                             @"iTerm",
@@ -3841,7 +3956,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                                           [[self activeSession] name],
                                                           [self realObjectCount]]
                                          andNotification:@"New Output"
-                                              andSession:[self activeSession]];
+                                             windowIndex:[[self activeSession] screenWindowIndex]
+                                                tabIndex:[[self activeSession] screenTabIndex]
+                                               viewIndex:[[self activeSession] screenViewIndex]];
         [[self activeSession] setGrowlNewOutput:YES];
     }
 
