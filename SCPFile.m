@@ -51,6 +51,16 @@ static NSError *SCPFileError(NSString *description) {
     [super dealloc];
 }
 
+// In NMSSH 2.0, -[NMSSHSession lastError] crashes if there is no rawSession.
+// When upgrading, remove this method (the bug was fixed in January, 2014).
+- (NSError *)lastError {
+  if (self.session.rawSession) {
+    return self.session.lastError;
+  } else {
+    return nil;
+  }
+}
+
 - (void)setQueue:(dispatch_queue_t)queue {
     @synchronized(self) {
         if (queue != _queue) {
@@ -128,16 +138,16 @@ static NSError *SCPFileError(NSString *description) {
     
     // Check if the host is {hostname}:{port} or {IPv4}:{port}
     if (components == 2) {
-        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
         
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     } else if (components >= 4 &&
                [hostComponents[0] hasPrefix:@"["] &&
                [hostComponents[components-2] hasSuffix:@"]"]) {
         // Check if the host is [{IPv6}]:{port}
-        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
         
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     }
@@ -185,8 +195,16 @@ static NSError *SCPFileError(NSString *description) {
         }
     }
     if (!self.session.isConnected) {
-        NSError *theError = self.session.lastError;
-        self.error = [NSString stringWithFormat:@"Connection failed: %@", theError.localizedDescription];
+        NSError *theError = [self lastError];
+        if (!theError) {
+            // If connection fails, there is no rawSession in NMSSHSession, so it can't return an
+            // error. Should that ever change, this clause will not execute.
+            theError = [NSError errorWithDomain:@"com.googlecode.iterm2"
+                                           code:-1
+                                       userInfo:@{ NSLocalizedDescriptionKey: @"Could not connect." }];
+        }
+        self.error = [NSString stringWithFormat:@"Connection failed: %@",
+                         theError.localizedDescription];
         dispatch_sync(dispatch_get_main_queue(), ^() {
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:theError];
@@ -194,6 +212,8 @@ static NSError *SCPFileError(NSString *description) {
         return;
     }
     
+    [self.session connectToAgent];
+
     if (!self.session.isAuthorized) {
         NSArray *authTypes = [self.session supportedAuthenticationMethods];
         if (!authTypes) {
@@ -241,8 +261,7 @@ static NSError *SCPFileError(NSString *description) {
                                                                  keyboardInteractivePrompt:@"Passphrase for private key:"];
                     });
                 }
-                // Try an empty passphrase first
-                BOOL ok = [self.session authenticateByPublicKey:[kPublicKeyPath stringByExpandingTildeInPath]
+                [self.session authenticateByPublicKey:[kPublicKeyPath stringByExpandingTildeInPath]
                                                      privateKey:[kPrivateKeyPath stringByExpandingTildeInPath]
                                                     andPassword:password];
             
@@ -260,7 +279,7 @@ static NSError *SCPFileError(NSString *description) {
         return;
     }
     if (!self.session.isAuthorized) {
-        __block NSError *error = self.session.lastError;
+        __block NSError *error = [self lastError];
         dispatch_sync(dispatch_get_main_queue(), ^() {
             if (!error) {
                 error = [NSError errorWithDomain:@"com.googlecode.iterm2.SCPFile"
@@ -348,7 +367,7 @@ static NSError *SCPFileError(NSString *description) {
                 });
                 return;
             } else {
-                NSString *errorDescription = [[self.session lastError] localizedDescription];
+                NSString *errorDescription = [[self lastError] localizedDescription];
                 if (errorDescription.length) {
                     self.error = errorDescription;
                 } else {
@@ -395,7 +414,7 @@ static NSError *SCPFileError(NSString *description) {
                 });
                 return;
             } else {
-                NSString *errorDescription = [[self.session lastError] localizedDescription];
+                NSString *errorDescription = [[self lastError] localizedDescription];
                 if (errorDescription.length) {
                     self.error = errorDescription;
                 } else {
@@ -470,7 +489,8 @@ static NSError *SCPFileError(NSString *description) {
 }
 
 - (BOOL)session:(NMSSHSession *)session shouldConnectToHostWithFingerprint:(NSString *)fingerprint {
-    __block BOOL result;
+    // It's not necessary to initialize result but it makes the analyzer shut up.
+    __block BOOL result = NO;
     dispatch_sync(dispatch_get_main_queue(), ^(void) {
         _okToAdd = NO;
         NSString *message;

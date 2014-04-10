@@ -156,6 +156,12 @@ typedef enum {
 // Session terminated. Remove any weak refs to it.
 - (void)sessionDidTerminate:(PTYSession *)session;
 
+// Pop the current session out and move it into its own window.
+- (void)moveSessionToWindow:(id)sender;
+
+// Call this when transparency changes.
+- (void)updateContentShadow;
+
 #pragma mark - Tabs
 
 // Close a tab and resize/close the window if needed.

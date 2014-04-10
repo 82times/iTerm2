@@ -73,6 +73,7 @@ typedef enum {
 
 // Check if any the character at x,y has been marked dirty.
 - (BOOL)isDirtyAtX:(int)x Y:(int)y;
+- (NSIndexSet *)dirtyIndexesOnLine:(int)line;
 - (void)resetDirty;
 
 // Save the current state to a new frame in the dvr.
@@ -101,6 +102,9 @@ typedef enum {
 - (NSString *)workingDirectoryOnLine:(int)line;
 - (SCPPath *)scpPathForFile:(NSString *)filename onLine:(int)line;
 - (VT100RemoteHost *)remoteHostOnLine:(int)line;
+
+// Indicates if we're in alternate screen mode.
+- (BOOL)showingAlternateScreen;
 
 - (void)clearBuffer;
 

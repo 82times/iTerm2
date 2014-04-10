@@ -1,17 +1,17 @@
 #import <Cocoa/Cocoa.h>
+#import "Autocomplete.h"
+#import "FutureMethods.h"
 #import "PSMTabBarControl.h"
 #import "PTYTabView.h"
 #import "PTYWindow.h"
-#import "ProfileListView.h"
-#import "WindowControllerInterface.h"
 #import "PasteboardHistory.h"
 #import "Popup.h"
-#import "Autocomplete.h"
-#import "ToolbeltView.h"
+#import "ProfileListView.h"
 #import "SolidColorView.h"
-#import "FutureMethods.h"
+#import "ToolbeltView.h"
+#import "WindowControllerInterface.h"
+#import "iTermInstantReplayWindowController.h"
 
-@class BottomBarView;
 @class PTYSession;
 @class PSMTabBarControl;
 @class PTToolbarController;
@@ -20,17 +20,23 @@
 
 @class TmuxController;
 
-// This class is 1:1 with windows. It controls the tabs, bottombar, toolbar,
+// This class is 1:1 with windows. It controls the tabs, toolbar,
 // fullscreen, and coordinates resizing of sessions (either session-initiated
 // or window-initiated).
 // OS 10.5 doesn't support window delegates
 @interface PseudoTerminal : NSWindowController <
+  iTermInstantReplayDelegate,
   iTermWindowController,
   NSWindowDelegate,
   PSMTabBarControlDelegate,
   PTYTabViewDelegateProtocol,
   PTYWindowDelegateProtocol,
   WindowControllerInterface>
+
+// Up to one window may be the hotkey window, which is toggled with the system-wide
+// hotkey.
+@property(nonatomic, assign) BOOL isHotKeyWindow;
+
 
 // Draws a mock-up of a window arrangement into the current graphics context.
 // |frames| gives an array of NSValue's having NSRect values for each screen,
@@ -39,11 +45,11 @@
                   screenFrames:(NSArray *)frames;
 
 // Returns a new terminal window restored from an arrangement, but with no
-// tabs/sessions.
+// tabs/sessions. May return nil.
 + (PseudoTerminal*)bareTerminalWithArrangement:(NSDictionary*)arrangement;
 
 // Returns a new terminal window restored from an arrangement, with
-// tabs/sessions also restored..
+// tabs/sessions also restored. May return nil.
 + (PseudoTerminal*)terminalWithArrangement:(NSDictionary*)arrangement;
 
 // Initialize a new PseudoTerminal.
@@ -151,12 +157,6 @@
 - (ToolbeltView *)toolbelt;
 
 - (void)refreshTools;
-
-#pragma mark - NSTextField Delegate Methods
-
-// Called when return or tab is pressed in the bottombar text field or the command
-// field.
-- (void)controlTextDidEndEditing:(NSNotification *)aNotification;
 
 #pragma mark - NSWindowController Delegate Methods
 
@@ -302,9 +302,6 @@
 // you anticipate its response). Does nothing if all tabs are tmux tabs.
 - (void)fitWindowToTabsExcludingTmuxTabs:(BOOL)excludeTmux;
 
-// Update irBar.
-- (void)updateInstantReplay;
-
 // Show or hide as needed for current session.
 - (void)showOrHideInstantReplayBar;
 
@@ -320,15 +317,14 @@
 // Returns the arrangement for this window.
 - (NSDictionary*)arrangement;
 
+// Returns the arrangement for this window, optionally excluding tmux tabs.
+- (NSDictionary *)arrangementExcludingTmuxTabs:(BOOL)excludeTmux;
+
 // Update a window's tmux layout, such as when fonts or scrollbar sizes change.
 - (void)refreshTmuxLayoutsAndWindow;
 
 // All tabs in this window.
 - (NSArray*)tabs;
-
-// Up to one window may be the hotkey window, which is toggled with the system-wide
-// hotkey.
-- (void)setIsHotKeyWindow:(BOOL)value;
 
 // Updates the window when screen parameters (number of screens, resolutions,
 // etc.) change.
@@ -353,6 +349,7 @@
 
 #pragma mark - IBActions
 
+- (IBAction)findUrls:(id)sender;
 - (IBAction)toggleShowTimestamps:(id)sender;
 - (IBAction)toggleAutoCommandHistory:(id)sender;
 - (IBAction)openDashboard:(id)sender;
@@ -381,11 +378,6 @@
 // Turn full-screen mode on or off. Creates a new PseudoTerminal and moves this
 // one's state into it.
 - (IBAction)toggleFullScreenMode:(id)sender;
-// Called when next/prev frame button is clicked.
-- (IBAction)irButton:(id)sender;
-// Called when the close button in the find bar is pressed.
-- (IBAction)closeInstantReplay:(id)sender;
-- (IBAction)irSliderMoved:(id)sender;
 // Advance to next or previous time step
 - (IBAction)irPrev:(id)sender;
 - (IBAction)irNext:(id)sender;
@@ -483,6 +475,8 @@
 -(void)handleSelectScriptCommand: (NSScriptCommand *)command;
 
 -(id)handleLaunchScriptCommand: (NSScriptCommand *)command;
+
+-(void)handleSplitScriptCommand: (NSScriptCommand *)command;
 
 @end
 

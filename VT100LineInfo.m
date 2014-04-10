@@ -75,12 +75,16 @@
 }
 
 - (BOOL)isDirtyAtOffset:(int)x {
-#if DEBUG
+#if ITERM_DEBUG
     assert(x >= 0 && x < width_);
 #else
     x = MIN(width_ - 1, MAX(0, x));
 #endif
     return x >= start_ && x < bound_;
+}
+
+- (NSIndexSet *)dirtyIndexes {
+    return [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(start_, bound_ - start_)];
 }
 
 - (BOOL)anyCharIsDirty {

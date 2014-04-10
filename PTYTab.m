@@ -311,15 +311,15 @@ static const BOOL USE_THIN_SPLITTERS = YES;
             // -[PTYTextView respondsToSelector:] on a deallocated instance of the
             // first responder. This kind of hacky workaround keeps us from making
             // a invisible textview the first responder.
-            [[realParentWindow_ window] makeFirstResponder:[session TEXTVIEW]];
+            [[realParentWindow_ window] makeFirstResponder:[session textview]];
         }
                 [realParentWindow_ setDimmingForSessions];
     }
     for (PTYSession* aSession in [self sessions]) {
-        [[aSession TEXTVIEW] refresh];
-        [[aSession TEXTVIEW] setNeedsDisplay:YES];
+        [[aSession textview] refresh];
+        [[aSession textview] setNeedsDisplay:YES];
     }
-    [self setLabelAttributes];
+    [self updateLabelAttributes];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermSessionBecameKey"
                                                         object:activeSession_];
     // If the active session changed in the active tab in the key window then update the
@@ -564,9 +564,8 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return objectCount_;
 }
 
-- (int)objectCount
-{
-    return [[PreferencePanel sharedInstance] useCompactLabel] ? 0 : objectCount_;
+- (int)objectCount {
+    return [[PreferencePanel sharedInstance] hideTabNumber] ? 0 : objectCount_;
 }
 
 - (void)setObjectCount:(int)value
@@ -607,14 +606,19 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     return ([[[self tabViewItem] tabView] selectedTabViewItem] == [self tabViewItem]);
 }
 
-- (BOOL)anySessionHasNewOutput
+- (BOOL)anySessionHasNewOutput:(BOOL *)okToNotify
 {
+    *okToNotify = NO;
+    BOOL result = NO;
     for (PTYSession* session in [self sessions]) {
         if ([session newOutput]) {
-            return YES;
+            if ([session shouldPostGrowlNotification]) {
+                *okToNotify = YES;
+            }
+            result = YES;
         }
     }
-    return NO;
+    return result;
 }
 
 static void SwapSize(NSSize* size) {
@@ -757,37 +761,35 @@ static NSString* FormatRect(NSRect r) {
     return [self _sessionAdjacentTo:session verticalDir:YES after:YES];
 }
 
-- (BOOL)setLabelAttributes
+- (BOOL)updateLabelAttributes
 {
-    PtyLog(@"PTYTab setLabelAttributes");
+    PtyLog(@"PTYTab updateLabelAttributes");
     struct timeval now;
-
+    BOOL needsFollowUp = NO;
+    
     gettimeofday(&now, NULL);
     if ([[self activeSession] exited]) {
         // Session has terminated.
-        [self _setLabelAttributesForDeadSession];
-        return NO;
-    } else if ([[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem]) {
-        // We are not the foreground tab.
-        if (now.tv_sec > [[self activeSession] lastOutput].tv_sec+2) {
+        [self setLabelAttributesForDeadSession];
+    } else {
+        if (now.tv_sec > [[self activeSession] lastOutput].tv_sec + 2) {
             // At least two seconds have passed since the last call.
-            [self _setLabelAttributesForIdleBackgroundTabAtTime:now];
-            return NO;
+            [self setLabelAttributesForIdleTabAtTime:now];
         } else {
             // Less than 2 seconds has passed since the last output in the session.
-            if ([self anySessionHasNewOutput]) {
-                [self _setLabelAttributesForActiveBackgroundTab];
+            BOOL okToNotify;
+            if ([self anySessionHasNewOutput:&okToNotify]) {
+                [self setLabelAttributesForActiveTab:okToNotify];
             }
-            return YES;
+            needsFollowUp = YES;
         }
-    } else {
-        // This tab is the foreground tab and the session hasn't exited.
-        [self _setLabelAttributesForForegroundTab];
-        return NO;
+        // If possible, reset label attributes on this tab.
+        [self resetLabelAttributesIfAppropriate];
     }
+    return needsFollowUp;
 }
 
-- (void)closeSession:(PTYSession*)session;
+- (void)closeSession:(PTYSession*)session
 {
     [[self parentWindow] closeSession:session];
 }
@@ -891,12 +893,12 @@ static NSString* FormatRect(NSRect r) {
     // Put the new session in DVR mode and pass it the old session, which it
     // keeps a reference to.
 
-    [newSession setDvr:[[oldSession SCREEN] dvr] liveSession:oldSession];
+    [newSession setDvr:[[oldSession screen] dvr] liveSession:oldSession];
 
     activeSession_ = newSession;
 
     // TODO(georgen): the hidden window can resize itself and the FakeWindow
-    // needs to pass that on to the SCREEN. Otherwise the DVR playback into the
+    // needs to pass that on to the screen. Otherwise the DVR playback into the
     // time after cmd-d was pressed (but before the present) has the wrong
     // window size.
     [self setFakeParentWindow:[[[FakeWindow alloc] initFromRealWindow:realParentWindow_
@@ -908,9 +910,9 @@ static NSString* FormatRect(NSRect r) {
 
 - (void)showLiveSession:(PTYSession*)liveSession inPlaceOf:(PTYSession*)replaySession
 {
-    PtyLog(@"PTYTab showLiveSessio:%p", liveSession);
+    PtyLog(@"PTYTab showLiveSession:%p", liveSession);
     [replaySession cancelTimers];
-    [liveSession setAddressBookEntry:[replaySession addressBookEntry]];
+    [liveSession setProfile:[replaySession profile]];
 
     SessionView* oldView = [replaySession view];
     SessionView* newView = [liveSession view];
@@ -1127,7 +1129,7 @@ static NSString* FormatRect(NSRect r) {
     // Make scrollbars the right size and put them at the tops of their session views.
     for (PTYSession *theSession in [self sessions]) {
         NSSize theSize = [theSession idealScrollViewSizeWithStyle:[parentWindow_ scrollerStyle]];
-        [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
+        [[theSession scrollview] setFrame:NSMakeRect(0,
                                                      0,
                                                      theSize.width,
                                                      theSize.height)];
@@ -1349,7 +1351,7 @@ static NSString* FormatRect(NSRect r) {
 - (NSSize)_sessionSize:(SessionView*)sessionView
 {
     PTYSession *session = [sessionView session];
-    return [PTYTab _sessionSizeWithCellSize:NSMakeSize([[session TEXTVIEW] charWidth], [[session TEXTVIEW] lineHeight])
+    return [PTYTab _sessionSizeWithCellSize:NSMakeSize([[session textview] charWidth], [[session textview] lineHeight])
                                  dimensions:NSMakeSize([session columns], [session rows])
                                  showTitles:[sessionView showTitle]
                                  inTerminal:parentWindow_];
@@ -1359,8 +1361,8 @@ static NSString* FormatRect(NSRect r) {
 {
     NSSize size;
     PTYSession* session = [sessionView session];
-    size.width = kVT100ScreenMinColumns * [[session TEXTVIEW] charWidth] + MARGIN * 2;
-    size.height = kVT100ScreenMinRows * [[session TEXTVIEW] lineHeight] + VMARGIN * 2;
+    size.width = kVT100ScreenMinColumns * [[session textview] charWidth] + MARGIN * 2;
+    size.height = kVT100ScreenMinRows * [[session textview] lineHeight] + VMARGIN * 2;
 
     BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
     NSSize scrollViewSize =
@@ -1570,7 +1572,7 @@ static NSString* FormatRect(NSRect r) {
 
 - (void)_drawSession:(PTYSession*)session inImage:(NSImage*)viewImage atOrigin:(NSPoint)origin
 {
-    NSImage *textviewImage = [session imageOfSession:YES];
+    NSImage *textviewImage = [session snapshot];
 
     origin.y = [viewImage size].height - [textviewImage size].height - origin.y;
     [viewImage lockFocus];
@@ -1731,11 +1733,11 @@ static NSString* FormatRect(NSRect r) {
     PtyLog(@"PTYTab fitSessionToCurrentViewSzie");
     PtyLog(@"fitSessionToCurrentViewSize begins");
     BOOL hasScrollbar = [parentWindow_ scrollbarShouldBeVisible];
-    [[aSession SCROLLVIEW] setHasVerticalScroller:hasScrollbar];
+    [[aSession scrollview] setHasVerticalScroller:hasScrollbar];
     NSSize size = [[aSession view] maximumPossibleScrollViewContentSize];
     DLog(@"Max size is %@", [NSValue valueWithSize:size]);
-    int width = (size.width - MARGIN*2) / [[aSession TEXTVIEW] charWidth];
-    int height = (size.height - VMARGIN*2) / [[aSession TEXTVIEW] lineHeight];
+    int width = (size.width - MARGIN*2) / [[aSession textview] charWidth];
+    int height = (size.height - VMARGIN*2) / [[aSession textview] lineHeight];
     PtyLog(@"fitSessionToCurrentViewSize %@ gives %d rows", [NSValue valueWithSize:size], height);
     if (width <= 0) {
         NSLog(@"WARNING: Session has %d width", width);
@@ -1773,8 +1775,8 @@ static NSString* FormatRect(NSRect r) {
 
     [aSession setWidth:width height:height];
     PtyLog(@"fitSessionToCurrentViewSize -  calling setWidth:%d height:%d", width, height);
-    [[aSession SCROLLVIEW] setLineScroll:[[aSession TEXTVIEW] lineHeight]];
-    [[aSession SCROLLVIEW] setPageScroll:2*[[aSession TEXTVIEW] lineHeight]];
+    [[aSession scrollview] setLineScroll:[[aSession textview] lineHeight]];
+    [[aSession scrollview] setPageScroll:2*[[aSession textview] lineHeight]];
     if ([aSession backgroundImagePath]) {
         [aSession setBackgroundImagePath:[aSession backgroundImagePath]];
     }
@@ -1823,8 +1825,8 @@ static NSString* FormatRect(NSRect r) {
     NSArray* sessions = [self sessions];
     for (PTYSession* session in sessions) {
         if ([session transparency] > 0 &&
-            [[session TEXTVIEW] useTransparency] &&
-            [[[session addressBookEntry] objectForKey:KEY_BLUR] boolValue]) {
+            [[session textview] useTransparency] &&
+            [[[session profile] objectForKey:KEY_BLUR] boolValue]) {
             ++y;
         } else {
             ++n;
@@ -1839,8 +1841,8 @@ static NSString* FormatRect(NSRect r) {
     double count = 0;
     NSArray* sessions = [self sessions];
     for (PTYSession* session in sessions) {
-        if ([[[session addressBookEntry] objectForKey:KEY_BLUR] boolValue]) {
-            sum += [[session addressBookEntry] objectForKey:KEY_BLUR_RADIUS] ? [[[session addressBookEntry] objectForKey:KEY_BLUR_RADIUS] floatValue] : 2.0;
+        if ([[[session profile] objectForKey:KEY_BLUR] boolValue]) {
+            sum += [[session profile] objectForKey:KEY_BLUR_RADIUS] ? [[[session profile] objectForKey:KEY_BLUR_RADIUS] floatValue] : 2.0;
             ++count;
         }
     }
@@ -2102,18 +2104,18 @@ static NSString* FormatRect(NSRect r) {
 
 - (void)notifyWindowChanged
 {
-  if (![self isTmuxTab]) {
-    return;
-  }
-  if (!flexibleView_) {
-    [self enableFlexibleView];
-  }
-  [self updateFlexibleViewColors];
-  [flexibleView_ setFrameSize:[[realParentWindow_ tabView] frame].size];
-  for (PTYSession *aSession in [self sessions]) {
-    [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it is a tmux tab
-    [[aSession view] updateTitleFrame];
-  }
+    if (![self isTmuxTab]) {
+        return;
+    }
+    if (!flexibleView_) {
+        [self enableFlexibleView];
+    }
+    [self updateFlexibleViewColors];
+    [flexibleView_ setFrameSize:[[realParentWindow_ tabView] frame].size];
+    for (PTYSession *aSession in [self sessions]) {
+        [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it is a tmux tab
+        [[aSession view] updateTitleFrame];
+    }
 }
 
 + (NSString *)htmlNameForColor:(NSColor *)color {
@@ -2397,14 +2399,14 @@ static NSString* FormatRect(NSRect r) {
 }
 
 + (void)setTmuxFont:(NSFont *)font
-             nafont:(NSFont *)nafont
+       nonAsciiFont:(NSFont *)nonAsciiFont
            hSpacing:(double)hs
            vSpacing:(double)vs
 {
     [[ProfileModel sharedInstance] setObject:[ITAddressBookMgr descFromFont:font]
                                        forKey:KEY_NORMAL_FONT
                                    inBookmark:[PTYTab tmuxBookmark]];
-    [[ProfileModel sharedInstance] setObject:[ITAddressBookMgr descFromFont:nafont]
+    [[ProfileModel sharedInstance] setObject:[ITAddressBookMgr descFromFont:nonAsciiFont]
                                        forKey:KEY_NON_ASCII_FONT
                                    inBookmark:[PTYTab tmuxBookmark]];
     [[ProfileModel sharedInstance] setObject:[NSNumber numberWithDouble:hs]
@@ -2454,7 +2456,7 @@ static NSString* FormatRect(NSRect r) {
 {
     [PTYTab setSizesInTmuxParseTree:parseTree_ inTerminal:realParentWindow_];
     [self resizeViewsInViewHierarchy:root_ forNewLayout:parseTree_];
-    [[root_ window] makeFirstResponder:[[self activeSession] TEXTVIEW]];
+    [[root_ window] makeFirstResponder:[[self activeSession] textview]];
 }
 
 + (PTYTab *)openTabWithTmuxLayout:(NSMutableDictionary *)parseTree
@@ -2563,8 +2565,8 @@ static NSString* FormatRect(NSRect r) {
         } else {
             SessionView *sv = (SessionView *)view;
             PTYSession *session = [sv session];
-            NSRect svFrame = [[session SCROLLVIEW] frame];
-            NSRect visibleFrame = [[session SCROLLVIEW] documentVisibleRect];  // excludes scrollbar, if any
+            NSRect svFrame = [[session scrollview] frame];
+            NSRect visibleFrame = [[session scrollview] documentVisibleRect];  // excludes scrollbar, if any
             int chars = forHeight ? (svFrame.size.height - VMARGIN * 2) / cellSize.height :
                                     (visibleFrame.size.width - MARGIN * 2) / cellSize.width;
             [intervalMap incrementNumbersBy:chars
@@ -2743,7 +2745,7 @@ static NSString* FormatRect(NSRect r) {
         NSRect aFrame = [PTYTab dictToFrame:[arrangement objectForKey:TAB_ARRANGEMENT_SESSIONVIEW_FRAME]];
         [sv setFrame:aFrame];
         NSSize theSize = [theSession idealScrollViewSizeWithStyle:[parentWindow_ scrollerStyle]];
-        [[theSession SCROLLVIEW] setFrame:NSMakeRect(0,
+        [[theSession scrollview] setFrame:NSMakeRect(0,
                                                      0,
                                                      theSize.width,
                                                      theSize.height)];
@@ -2883,7 +2885,7 @@ static NSString* FormatRect(NSRect r) {
         [self replaceViewHierarchyWithParseTree:parseTree];
     }
     [self updateFlexibleViewColors];
-    [[root_ window] makeFirstResponder:[[self activeSession] TEXTVIEW]];
+    [[root_ window] makeFirstResponder:[[self activeSession] textview]];
     [parseTree_ release];
     parseTree_ = [parseTree retain];
 }
@@ -2930,7 +2932,7 @@ static NSString* FormatRect(NSRect r) {
     [root_ addSubview:temp];
     [temp release];
 
-    [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
+    [[root_ window] makeFirstResponder:[activeSession_ textview]];
     [realParentWindow_ invalidateRestorableState];
 }
 
@@ -2963,7 +2965,7 @@ static NSString* FormatRect(NSRect r) {
     savedArrangement_ = nil;
     isMaximized_ = NO;
 
-    [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
+    [[root_ window] makeFirstResponder:[activeSession_ textview]];
     [realParentWindow_ invalidateRestorableState];
 }
 
@@ -3702,7 +3704,8 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         double currentSumOfSizes = 0;
         if (sizeChangeCoeff == 0) {
             // Original size was 0 so make all subviews equal.
-            for (NSView* aSubview in [splitView subviews]) {
+            const int numSubviews = [[splitView subviews] count];
+            for (int subviewNumber = 0; subviewNumber < numSubviews; subviewNumber++) {
                 const double size = lround(targetSize / n);
                 currentSumOfSizes += size;
                 [sizes addObject:[NSNumber numberWithDouble:size]];
@@ -3834,9 +3837,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     if ([theView isKindOfClass:[SessionView class]]) {
         SessionView* sessionView = (SessionView*)theView;
         if (wantWidth) {
-            return [[[sessionView session] TEXTVIEW] charWidth];
+            return [[[sessionView session] textview] charWidth];
         } else {
-            return [[[sessionView session] TEXTVIEW] lineHeight];
+            return [[[sessionView session] textview] lineHeight];
         }
     } else {
         CGFloat maxStep = 0;
@@ -3881,7 +3884,7 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
 
 #pragma mark - Private
 
-- (void)_setLabelAttributesForDeadSession
+- (void)setLabelAttributesForDeadSession
 {
     [parentWindow_ setLabelColor:deadStateColor
                  forTabViewItem:tabViewItem_];
@@ -3897,8 +3900,9 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     return elapsed < (2 * kBackgroundSessionIntervalSec);
 }
 
-- (void)_setLabelAttributesForIdleBackgroundTabAtTime:(struct timeval)now
+- (void)setLabelAttributesForIdleTabAtTime:(struct timeval)now
 {
+    BOOL isBackgroundTab = [[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem];
     if ([self isProcessing]) {
         [self setIsProcessing:NO];
     }
@@ -3906,47 +3910,49 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
     for (PTYSession* session in [self sessions]) {
         if ([session newOutput]) {
             // Idle after new output
-            if (![session growlIdle] &&
-                [[session SCREEN] postGrowlNotifications] &&
+            if (!session.havePostedIdleNotification &&
+                [session shouldPostGrowlNotification] &&
                 [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC &&
                 now.tv_sec > [session lastOutput].tv_sec + 1) {
-                [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"Idle",
-                                                                                                    @"iTerm",
-                                                                                                    [NSBundle bundleForClass:[self class]],
-                                                                                                    @"Growl Alerts")
-                                                 withDescription:[NSString stringWithFormat:NSLocalizedStringFromTableInBundle(@"Session %@ in tab #%d became idle.",
-                                                                                                                               @"iTerm",
-                                                                                                                               [NSBundle bundleForClass:[self class]],
-                                                                                                                               @"Growl Alerts"),
-                                                                  [[self activeSession] name],
-                                                                  [self realObjectCount]]
+                NSString *theDescription =
+                    [NSString stringWithFormat:@"Session %@ in tab #%d became idle.",
+                        [[self activeSession] name],
+                        [self realObjectCount]];
+                [[iTermGrowlDelegate sharedInstance] growlNotify:@"Idle"
+                                                 withDescription:theDescription
                                                  andNotification:@"Idle"
                                                      windowIndex:[session screenWindowIndex]
                                                         tabIndex:[session screenTabIndex]
                                                        viewIndex:[session screenViewIndex]];
-                [session setGrowlIdle:YES];
-                [session setGrowlNewOutput:NO];
+                session.havePostedIdleNotification = YES;
+                session.havePostedNewOutputNotification = NO;
             }
-            [parentWindow_ setLabelColor:idleStateColor
-                          forTabViewItem:tabViewItem_];
+            if (isBackgroundTab) {
+                [parentWindow_ setLabelColor:idleStateColor
+                              forTabViewItem:tabViewItem_];
+            }
         } else {
             // normal state
-            [parentWindow_ setLabelColor:normalStateColor
-                          forTabViewItem:tabViewItem_];
+            if (isBackgroundTab) {
+                [parentWindow_ setLabelColor:normalStateColor
+                              forTabViewItem:tabViewItem_];
+            }
         }
     }
 }
 
-- (void)_setLabelAttributesForActiveBackgroundTab
+- (void)setLabelAttributesForActiveTab:(BOOL)notify
 {
-    if ([self isProcessing] == NO &&
-        ![[PreferencePanel sharedInstance] useCompactLabel]) {
+    BOOL isBackgroundTab = [[tabViewItem_ tabView] selectedTabViewItem] != [self tabViewItem];
+    const BOOL compactTab = ([[PreferencePanel sharedInstance] hideTabNumber] &&
+                             [[PreferencePanel sharedInstance] hideTabCloseButton]);
+    if ([self isProcessing] == NO && !compactTab && ![self isForegroundTab]) {
         [self setIsProcessing:YES];
     }
 
-    if (![[self activeSession] growlNewOutput] &&
+    if (![[self activeSession] havePostedNewOutputNotification] &&
         [[self realParentWindow] broadcastMode] == BROADCAST_OFF &&
-        [[[self activeSession] SCREEN] postGrowlNotifications] &&
+        notify &&
         [[NSDate date] timeIntervalSinceDate:[SessionView lastResizeDate]] > POST_WINDOW_RESIZE_SILENCE_SEC) {
         [[iTermGrowlDelegate sharedInstance] growlNotify:NSLocalizedStringFromTableInBundle(@"New Output",
                                                                                             @"iTerm",
@@ -3959,7 +3965,8 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
                                              windowIndex:[[self activeSession] screenWindowIndex]
                                                 tabIndex:[[self activeSession] screenTabIndex]
                                                viewIndex:[[self activeSession] screenViewIndex]];
-        [[self activeSession] setGrowlNewOutput:YES];
+        [[self activeSession] setHavePostedNewOutputNotification:YES];
+        [[self activeSession] setHavePostedIdleNotification:NO];
     }
 
     if ([self _windowResizedRecently]) {
@@ -3968,21 +3975,35 @@ static void SetAgainstGrainDim(BOOL isVertical, NSSize* dest, CGFloat value)
         for (PTYSession* session in [self sessions]) {
             [session setNewOutput:NO];
         }
-    } else {
+    } else if (isBackgroundTab) {
         [[self parentWindow] setLabelColor:newOutputStateColor
                             forTabViewItem:tabViewItem_];
     }
 }
 
-- (void)_setLabelAttributesForForegroundTab
+- (void)resetLabelAttributesIfAppropriate
 {
-    if ([self isProcessing]) {
-        [self setIsProcessing:NO];
+    BOOL amProcessing = [self isProcessing];
+    BOOL shouldResetLabel = NO;
+    for (PTYSession *aSession in [self sessions]) {
+        if (!amProcessing &&
+            !aSession.havePostedNewOutputNotification &&
+            !aSession.newOutput) {
+            // Avoid calling the potentially expensive -shouldPostGrowlNotification if there's
+            // nothing to do here, which is normal.
+            continue;
+        }
+        if (![aSession shouldPostGrowlNotification]) {
+            [aSession setHavePostedNewOutputNotification:NO];
+            [aSession setNewOutput:NO];
+            shouldResetLabel = YES;
+        }
     }
-    [[self activeSession] setGrowlNewOutput:NO];
-    [[self activeSession] setNewOutput:NO];
-    [[self parentWindow] setLabelColor:chosenStateColor
-                        forTabViewItem:[self tabViewItem]];
+    if (shouldResetLabel && [self isForegroundTab]) {
+        [self setIsProcessing:NO];
+        [[self parentWindow] setLabelColor:chosenStateColor
+                            forTabViewItem:[self tabViewItem]];
+    }
 }
 
 @end

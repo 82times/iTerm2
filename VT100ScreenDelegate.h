@@ -1,7 +1,10 @@
 #import <Cocoa/Cocoa.h>
 #import "PTYTextViewDataSource.h"
+#import "VT100Token.h"
 
 @class VT100RemoteHost;
+@class iTermColorMap;
+@class iTermSelection;
 
 @protocol VT100ScreenDelegate <NSObject>
 
@@ -31,6 +34,7 @@
 
 // Called after text was added to the current line. Can be used to check triggers.
 - (void)screenDidAppendStringToCurrentLine:(NSString *)string;
+- (void)screenDidAppendAsciiDataToCurrentLine:(AsciiData *)asciiData;
 
 // Change the cursor's appearance.
 - (void)screenSetCursorBlinking:(BOOL)blink;
@@ -115,6 +119,9 @@
 // Requests that tmux integration mode begin.
 - (void)screenStartTmuxMode;
 
+// Handle a line of input in tmux mode in the token's string.
+- (void)screenHandleTmuxInput:(VT100Token *)token;
+
 // See comment in setSendModifiers:
 - (void)screenModifiersDidChangeTo:(NSArray *)modifiers;
 
@@ -139,17 +146,8 @@
 // PTYTextView deselect
 - (void)screenRemoveSelection;
 
-// Returns inclusive bounds of selection range, or -1 if no selection present.
-- (int)screenSelectionStartX;
-- (int)screenSelectionEndX;
-- (int)screenSelectionStartY;
-- (int)screenSelectionEndY;
-
-// Sets inclusive bounds of selection range.
-- (void)screenSetSelectionFromX:(int)startX
-                          fromY:(int)startY
-                            toX:(int)endX
-                            toY:(int)endY;
+// Selection range
+- (iTermSelection *)screenSelection;
 
 // Returns the size in pixels of a single cell.
 - (NSSize)screenCellSize;
@@ -164,7 +162,9 @@
 - (void)screenFlashImage:(FlashImage)image;
 
 - (void)screenIncrementBadge;
-- (void)screenRequestUserAttention:(BOOL)isCritical;
+
+// Bounce the dock. Set request to false to cancel.
+- (void)screenRequestAttention:(BOOL)request isCritical:(BOOL)isCritical;
 - (NSString *)screenCurrentWorkingDirectory;
 
 // Show/hide the cursor.
@@ -177,8 +177,6 @@
 
 // Returns if there is a view.
 - (BOOL)screenHasView;
-
-- (void)screenSetColorTableEntryAtIndex:(int)n color:(NSColor *)color;
 
 // Save the current scroll position
 - (void)screenSaveScrollPosition;
@@ -199,14 +197,7 @@
 - (void)screenDidReceiveBase64FileData:(NSString *)data;
 - (void)screenFileReceiptEndedUnexpectedly;
 
-- (void)screenRequestAttention:(BOOL)request;
-- (void)screenSetForegroundColor:(NSColor *)color;
-- (void)screenSetBackgroundColor:(NSColor *)color;
-- (void)screenSetBoldColor:(NSColor *)color;
-- (void)screenSetSelectionColor:(NSColor *)color;
-- (void)screenSetSelectedTextColor:(NSColor *)color;
-- (void)screenSetCursorColor:(NSColor *)color;
-- (void)screenSetCursorTextColor:(NSColor *)color;
+- (iTermColorMap *)screenColorMap;
 - (void)screenSetCurrentTabColor:(NSColor *)color;
 - (void)screenSetTabColorRedComponentTo:(CGFloat)color;
 - (void)screenSetTabColorGreenComponentTo:(CGFloat)color;

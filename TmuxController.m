@@ -42,6 +42,8 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
 
 @interface TmuxController ()
 
+@property (nonatomic, copy) NSString *clientName;
+
 - (int)windowIdFromString:(NSString *)s;
 - (void)retainWindow:(int)window withTab:(PTYTab *)tab;
 - (void)releaseWindow:(int)window;
@@ -59,7 +61,7 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
 @synthesize sessions = sessions_;
 @synthesize ambiguousIsDoubleWidth = ambiguousIsDoubleWidth_;
 
-- (id)initWithGateway:(TmuxGateway *)gateway
+- (id)initWithGateway:(TmuxGateway *)gateway clientName:(NSString *)clientName
 {
     self = [super init];
     if (self) {
@@ -70,14 +72,15 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
         origins_ = [[NSMutableDictionary alloc] init];
         pendingWindowOpens_ = [[NSMutableSet alloc] init];
         hiddenWindows_ = [[NSMutableSet alloc] init];
-        [[TmuxControllerRegistry sharedInstance] setController:self
-                                                     forClient:@""];  // Set a proper client name
+        self.clientName = [[TmuxControllerRegistry sharedInstance] uniqueClientNameBasedOn:clientName];
+        [[TmuxControllerRegistry sharedInstance] setController:self forClient:_clientName];
     }
     return self;
 }
 
 - (void)dealloc
 {
+    [_clientName release];
     [gateway_ release];
     [windowPanes_ release];
     [windows_ release];
@@ -360,7 +363,7 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
     [[NSNotificationCenter defaultCenter] postNotificationName:kTmuxControllerDetachedNotification
                                                         object:self];
     [[TmuxControllerRegistry sharedInstance] setController:nil
-                                                 forClient:@""];  // Set a proper client name
+                                                 forClient:self.clientName];
 }
 
 - (BOOL)windowDidResize:(NSWindowController<iTermWindowController> *)term
@@ -564,14 +567,11 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
 
 - (void)unlinkWindowWithId:(int)windowId inSession:(NSString *)sessionName
 {
-    // see the notes in TmuxGateway.h about kTmuxGatewayCommandHasEndGuardBug.
-    // I submitted a patch to tmux on 4/6/13, but it's not clear how long the
-    // workaround should stick around.
     [gateway_ sendCommand:[NSString stringWithFormat:@"unlink-window -k -t @%d", windowId]
            responseTarget:nil
          responseSelector:nil
-                   responseObject:nil
-                                        flags:kTmuxGatewayCommandHasEndGuardBug];
+           responseObject:nil
+                    flags:0];
 }
 
 - (void)renameWindowWithId:(int)windowId inSession:(NSString *)sessionName toName:(NSString *)newName
@@ -587,7 +587,7 @@ static NSString *kListWindowsFormat = @"\"#{session_name}\t#{window_id}\t"
            responseTarget:nil
          responseSelector:nil
            responseObject:nil
-                    flags:kTmuxGatewayCommandHasEndGuardBug];
+                    flags:0];
 }
 
 - (void)breakOutWindowPane:(int)windowPane toPoint:(NSPoint)screenPoint

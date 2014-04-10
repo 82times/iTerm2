@@ -30,21 +30,24 @@
 #import "ColorsMenuItemView.h"
 #import "HotkeyWindowController.h"
 #import "ITAddressBookMgr.h"
+#import "iTermController.h"
+#import "iTermExpose.h"
+#import "iTermFontPanel.h"
+#import "iTermRemotePreferences.h"
+#import "iTermSettingsModel.h"
+#import "iTermWarning.h"
 #import "NSStringITerm.h"
 #import "NSView+RecursiveDescription.h"
-#import "PTYSession.h"
-#import "PTYTab.h"
-#import "PTYTextView.h"
-#import "PTYWindow.h"
 #import "PreferencePanel.h"
 #import "ProfilesWindow.h"
 #import "PseudoTerminal.h"
 #import "PseudoTerminalRestorer.h"
+#import "PTYSession.h"
+#import "PTYTab.h"
+#import "PTYTextView.h"
+#import "PTYWindow.h"
 #import "ToastWindowController.h"
 #import "VT100Terminal.h"
-#import "iTermController.h"
-#import "iTermExpose.h"
-#import "iTermFontPanel.h"
 #import <objc/runtime.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -56,7 +59,11 @@ static NSString *ITERM2_FLAG = @"~/Library/Application Support/iTerm/version.txt
 static NSString *ITERM2_QUIET = @"~/Library/Application Support/iTerm/quiet";
 static NSString *kUseBackgroundPatternIndicatorKey = @"Use background pattern indicator";
 NSString *kUseBackgroundPatternIndicatorChangedNotification = @"kUseBackgroundPatternIndicatorChangedNotification";
-static NSString *const kMultiLinePasteWarningUserDefaultsKey = @"Multi-Line Paste Warning";
+
+// There was an older userdefaults key "Multi-Line Paste Warning" that had the opposite semantics.
+// This was changed for compatibility with the iTermWarning mechanism.
+NSString *const kMultiLinePasteWarningUserDefaultsKey = @"NoSyncDoNotWarnBeforeMultilinePaste";
+
 static BOOL gStartupActivitiesPerformed = NO;
 // Prior to 8/7/11, there was only one window arrangement, always called Default.
 static NSString *LEGACY_DEFAULT_ARRANGEMENT_NAME = @"Default";
@@ -352,67 +359,11 @@ static BOOL hasBecomeActive = NO;
     [iTermController sharedInstanceRelease];
 
     // save preferences
-    [[PreferencePanel sharedInstance] savePreferences];
-    if (![[PreferencePanel sharedInstance] customFolderChanged]) {
-        if ([[PreferencePanel sharedInstance] prefsDifferFromRemote]) {
-            NSString *remote = [[PreferencePanel sharedInstance] remotePrefsLocation];
-            if ([remote hasPrefix:@"http://"] ||
-                [remote hasPrefix:@"https://"]) {
-                // If the setting is always copy, then ask. Copying isn't an option.
-                if (![[NSUserDefaults standardUserDefaults] objectForKey:@"NoSyncNeverRemindPrefsChangesLost"]) {
-                    if (NSRunAlertPanel(@"Preference Changes Will be Lost!",
-                                        [NSString stringWithFormat:@"Your preferences are loaded from a URL and differ from your local preferences. To save your local preferences, copy ~/Library/Preferences/com.googlecode.iterm2.plist to %@ after quitting iTerm2.", remote],
-                                        @"OK",
-                                        @"Never Remind Me Again",
-                                        nil) == NSAlertAlternateReturn) {
-                        [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:YES]
-                                                                  forKey:@"NoSyncNeverRemindPrefsChangesLost"];
-                    }
-                }
-            } else {
-                // Not a URL
-                NSString *format;
-                if ([ProfileModel migrated]) {
-                    format = @"Your preferences were modified by iTerm2 as part of an upgrade process (and you might have changed them, too). "
-                    @"Since you load prefs from a custom location, your local preferences will be lost if not copied to %@.";
-                } else {
-                    format = @"Your preferences are loaded from a custom location and differ from your local preferences."
-                    @"Your local preferences will be lost if not copied to %@.";
-                }
-                if ([[NSUserDefaults standardUserDefaults] objectForKey:@"NoSyncNeverRemindPrefsChangesCopy"]) {
-                    // Always copy
-                    [[PreferencePanel sharedInstance] pushToCustomFolder:nil];
-                } else if (![[NSUserDefaults standardUserDefaults] objectForKey:@"NoSyncNeverRemindPrefsChangesLost"]) {
-                    // No "always" action.
-                    NSAlert *alert;
-                    alert = [NSAlert alertWithMessageText:@"Preference Changes Will be Lost!"
-                                            defaultButton:@"Copy"
-                                          alternateButton:@"Lose Changes"
-                                              otherButton:nil
-                                informativeTextWithFormat:format, remote];
-                    [alert setShowsSuppressionButton:YES];
-                    [[alert suppressionButton] setTitle:@"Always use this option."];
-                    BOOL doCopy = NO;
-                    switch ([alert runModal]) {
-                        case NSAlertDefaultReturn:
-                            doCopy = YES;
-                            break;
-
-                        case NSAlertAlternateReturn:
-                            break;
-                    }
-                    if ([[alert suppressionButton] state] == NSOnState) {
-                            [[NSUserDefaults standardUserDefaults]
-                                setObject:[NSNumber numberWithBool:YES]
-                                   forKey:doCopy ? @"NoSyncNeverRemindPrefsChangesCopy" :
-                                                   @"NoSyncNeverRemindPrefsChangesLost"];
-                    }
-                    if (doCopy) {
-                        [[PreferencePanel sharedInstance] pushToCustomFolder:nil];
-                    }
-                }
-            }
-        }
+    PreferencePanel *preferencePanel = [PreferencePanel sharedInstance];
+    [preferencePanel savePreferences];
+    if (![preferencePanel customFolderChanged]) {
+        [preferencePanel savePreferences];
+        [[iTermRemotePreferences sharedInstance] applicationWillTerminate];
     }
 
     return YES;
@@ -425,7 +376,7 @@ static BOOL hasBecomeActive = NO;
 
 - (PseudoTerminal *)terminalToOpenFileIn
 {
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"OpenFileInNewWindows"]) {
+    if ([iTermSettingsModel openFileInNewWindows]) {
         return nil;
     } else {
         return [self currentTerminal];
@@ -497,10 +448,13 @@ static BOOL hasBecomeActive = NO;
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app
 {
+    NSArray *terminals = [[iTermController sharedInstance] terminals];
+    if (terminals.count == 1 && [terminals[0] isHotKeyWindow]) {
+        // The last window wasn't really closed, it was just the hotkey window getting ordered out.
+        return NO;
+    }
     if (!userHasInteractedWithAnySession_) {
-        NSNumber* pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"MinRunningTime"];
-        const double kMinRunningTime =  pref ? [pref floatValue] : 10;
-        if ([[NSDate date] timeIntervalSinceDate:launchTime_] < kMinRunningTime) {
+        if ([[NSDate date] timeIntervalSinceDate:launchTime_] < [iTermSettingsModel minRunningTime]) {
             NSLog(@"Not quitting iTerm2 because it ran very briefly and had no user interaction. Set the MinRunningTime float preference to 0 to turn this feature off.");
             return NO;
         }
@@ -540,13 +494,9 @@ static BOOL hasBecomeActive = NO;
     // The screens' -visibleFrame is not updated when this is called. Doing a delayed perform with
     // a delay of 0 is usually, but not always enough. Not that 1 second is always enough either,
     // I suppose, but I don't want to die on this hill.
-    NSNumber *delay = [[NSUserDefaults standardUserDefaults] objectForKey:@"UpdateScreenParamsDelay"];
-    if (!delay) {
-        delay = [NSNumber numberWithInt:1];
-    }
     [self performSelector:@selector(updateScreenParametersInAllTerminals)
                withObject:nil
-               afterDelay:[delay intValue]];
+               afterDelay:[iTermSettingsModel updateScreenParamsDelay]];
 }
 
 - (void)updateScreenParametersInAllTerminals {
@@ -747,7 +697,7 @@ static BOOL hasBecomeActive = NO;
     }
     if ([query objectForKey:@"command"]) {
         NSData *theData;
-        NSStringEncoding encoding = [[aSession TERMINAL] encoding];
+        NSStringEncoding encoding = [[aSession terminal] encoding];
         theData = [[[query objectForKey:@"command"] stringByReplacingPercentEscapesUsingEncoding:encoding] dataUsingEncoding:encoding];
         [aSession writeTask:theData];
         [aSession writeTask:[@"\r" dataUsingEncoding:encoding]];
@@ -843,7 +793,11 @@ static BOOL hasBecomeActive = NO;
     [[iTermController sharedInstance] irAdvance:1];
 }
 
-- (void)_newSessionMenu:(NSMenu*)superMenu title:(NSString*)title target:(id)aTarget selector:(SEL)selector openAllSelector:(SEL)openAllSelector
+- (void)newSessionMenu:(NSMenu*)superMenu
+                 title:(NSString*)title
+                target:(id)aTarget
+              selector:(SEL)selector
+       openAllSelector:(SEL)openAllSelector
 {
     //new window menu
     NSMenuItem *newMenuItem;
@@ -890,16 +844,16 @@ static BOOL hasBecomeActive = NO;
                      action:@selector(newWindow:)
               keyEquivalent:@""];
     [aMenu addItem:[NSMenuItem separatorItem]];
-    [self _newSessionMenu:aMenu
-                    title:@"New Window…"
-                   target:[iTermController sharedInstance]
-                 selector:@selector(newSessionInWindowAtIndex:)
-          openAllSelector:@selector(newSessionsInNewWindow:)];
-    [self _newSessionMenu:aMenu
-                    title:@"New Tab…"
-                   target:frontTerminal
-                 selector:@selector(newSessionInTabAtIndex:)
-          openAllSelector:@selector(newSessionsInWindow:)];
+    [self newSessionMenu:aMenu
+                   title:@"New Window…"
+                  target:[iTermController sharedInstance]
+                selector:@selector(newSessionInWindowAtIndex:)
+         openAllSelector:@selector(newSessionsInNewWindow:)];
+    [self newSessionMenu:aMenu
+                   title:@"New Tab…"
+                  target:frontTerminal
+                selector:@selector(newSessionInTabAtIndex:)
+         openAllSelector:@selector(newSessionsInWindow:)];
     [self _addArrangementsMenuTo:aMenu];
 
     return ([aMenu autorelease]);
@@ -908,12 +862,6 @@ static BOOL hasBecomeActive = NO;
 - (void)applicationWillBecomeActive:(NSNotification *)aNotification
 {
     DLog(@"******** Become Active");
-    for (PseudoTerminal* term in [self terminals]) {
-        if ([term isHotKeyWindow]) {
-            //NSLog(@"Visor is open; not rescuing orphans.");
-            return;
-        }
-    }
 }
 
 - (void)hideToolTipsInView:(NSView *)aView {
@@ -1034,7 +982,7 @@ static BOOL hasBecomeActive = NO;
 
 - (BOOL)warnBeforeMultiLinePaste {
     NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
-    return [userDefaults boolForKey:kMultiLinePasteWarningUserDefaultsKey];
+    return ![userDefaults boolForKey:kMultiLinePasteWarningUserDefaultsKey];
 }
 
 - (IBAction)maximizePane:(id)sender
@@ -1156,7 +1104,7 @@ static BOOL hasBecomeActive = NO;
     PTYSession *session = [frontTerminal currentSession];
     [session changeFontSizeDirection:0];
     if ([sender isAlternate]) {
-        NSDictionary *abEntry = [session originalAddressBookEntry];
+        NSDictionary *abEntry = [session originalProfile];
         [frontTerminal sessionInitiatedResize:session
                                         width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
                                        height:[[abEntry objectForKey:KEY_ROWS] intValue]];
@@ -1308,7 +1256,7 @@ static BOOL hasBecomeActive = NO;
         NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
         [mainMenu insertItem:downloadsMenu_
                      atIndex:mainMenu.itemArray.count - 1];
-        [downloadsMenu_ setSubmenu:[[NSMenu alloc] initWithTitle:@"Downloads"]];
+        [downloadsMenu_ setSubmenu:[[[NSMenu alloc] initWithTitle:@"Downloads"] autorelease]];
     }
     return [downloadsMenu_ submenu];
 }
@@ -1321,7 +1269,7 @@ static BOOL hasBecomeActive = NO;
         NSMenu *mainMenu = [[NSApplication sharedApplication] mainMenu];
         [mainMenu insertItem:uploadsMenu_
                      atIndex:mainMenu.itemArray.count - 1];
-        [uploadsMenu_ setSubmenu:[[NSMenu alloc] initWithTitle:@"Uploads"]];
+        [uploadsMenu_ setSubmenu:[[[NSMenu alloc] initWithTitle:@"Uploads"] autorelease]];
     }
     return [uploadsMenu_ submenu];
 }
@@ -1585,57 +1533,6 @@ static BOOL hasBecomeActive = NO;
 }
 
 
-@end
-
-@implementation iTermApplicationDelegate (Find_Actions)
-
-- (IBAction) showFindPanel: (id) sender
-{
-        [[iTermController sharedInstance] showHideFindBar];
-}
-
-// findNext and findPrevious are reversed here because in the search UI next
-// goes backwards and previous goes forwards.
-// Internally, next=forward and prev=backwards.
-- (IBAction)findPrevious:(id)sender
-{
-    PseudoTerminal* pty = [[iTermController sharedInstance] currentTerminal];
-    if (pty) {
-        [[pty currentSession] searchNext];
-    }
-}
-
-- (IBAction)findNext:(id)sender
-{
-    PseudoTerminal* pty = [[iTermController sharedInstance] currentTerminal];
-    if (pty) {
-        [[pty currentSession] searchPrevious];
-    }
-}
-
-- (IBAction)findWithSelection:(id)sender
-{
-    NSString* selection = [[[[[iTermController sharedInstance] currentTerminal] currentSession] TEXTVIEW] selectedText];
-    if (selection) {
-        for (PseudoTerminal* pty in [[iTermController sharedInstance] terminals]) {
-            for (PTYSession* session in [pty sessions]) {
-                [session useStringForFind:selection];
-            }
-        }
-    }
-}
-
-- (IBAction)jumpToSelection:(id)sender
-{
-    id obj = [[NSApp mainWindow] firstResponder];
-    PTYTextView *textView = 
-        (obj && [obj isKindOfClass:[PTYTextView class]]) ? obj : nil;
-    if (textView) {
-        [textView scrollToSelection];
-    } else {
-        NSBeep();
-    }
-}
 
 @end
 

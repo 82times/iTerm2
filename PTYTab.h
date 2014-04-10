@@ -157,9 +157,8 @@
 - (BOOL)realIsProcessing;
 - (void)setIsProcessing:(BOOL)aFlag;
 - (BOOL)isActiveSession;
-- (BOOL)anySessionHasNewOutput;
 // Returns true if another update may be needed later (so the timer should be scheduled).
-- (BOOL)setLabelAttributes;
+- (BOOL)updateLabelAttributes;
 - (void)closeSession:(PTYSession*)session;
 - (void)terminateAllSessions;
 - (NSArray*)sessions;
@@ -227,7 +226,7 @@
                        tmuxWindow:(int)tmuxWindow
                    tmuxController:(TmuxController *)tmuxController;
 + (void)setTmuxFont:(NSFont *)font
-             nafont:(NSFont *)nafont
+       nonAsciiFont:(NSFont *)nonAsciiFont
            hSpacing:(double)hs
            vSpacing:(double)vs;
 

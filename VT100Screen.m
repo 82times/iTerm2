@@ -4,6 +4,7 @@
 #import "DVR.h"
 #import "IntervalTree.h"
 #import "NSArray+iTerm.h"
+#import "NSColor+iTerm.h"
 #import "PTYNoteViewController.h"
 #import "PTYTextView.h"
 #import "RegexKitLite.h"
@@ -12,8 +13,11 @@
 #import "VT100RemoteHost.h"
 #import "VT100ScreenMark.h"
 #import "VT100WorkingDirectory.h"
+#import "iTermColorMap.h"
 #import "iTermExpose.h"
 #import "iTermGrowlDelegate.h"
+#import "iTermSelection.h"
+#import "VT100Token.h"
 
 #import <apr-1/apr_base64.h>
 #include <string.h>
@@ -106,6 +110,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [dvr_ release];
     [terminal_ release];
     [findContext_ release];
+    [savedIntervalTree_ release];
     [intervalTree_ release];
     [markCache_ release];
     [inlineFileInfo_ release];
@@ -151,13 +156,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
     [primaryGrid_ markAllCharsDirty:YES];
     [altGrid_ markAllCharsDirty:YES];
-}
-
-- (VT100GridCoordRange)coordRangeForCurrentSelection {
-    return VT100GridCoordRangeMake([delegate_ screenSelectionStartX],
-                                   [delegate_ screenSelectionStartY],
-                                   [delegate_ screenSelectionEndX],
-                                   [delegate_ screenSelectionEndY]);
 }
 
 // This is used for a very specific case. It's used when you have some history, optionally followed
@@ -306,6 +304,11 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 {
     DLog(@"Resize session to %d height", new_height);
 
+    if (commandStartX_ != -1) {
+        commandStartX_ = commandStartY_ = -1;
+        [delegate_ screenCommandDidEndWithRange:[self commandRange]];
+    }
+    
     if (currentGrid_.size.width == 0 ||
         currentGrid_.size.height == 0 ||
         (new_width == currentGrid_.size.width &&
@@ -316,42 +319,47 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     new_width = MAX(new_width, 1);
     new_height = MAX(new_height, 1);
 
-    BOOL hasSelection = ([delegate_ screenHasView] &&
-                         [delegate_ screenSelectionStartX] >= 0 &&
-                         [delegate_ screenSelectionEndX] >= 0 &&
-                         [delegate_ screenSelectionStartY] >= 0 &&
-                         [delegate_ screenSelectionEndY] >= 0);
+    iTermSelection *selection = [delegate_ screenSelection];
+    if (selection.live) {
+        [selection endLiveSelection];
+    }
+    [selection removeWindowsWithWidth:self.width];
+    BOOL couldHaveSelection = [delegate_ screenHasView] && selection.hasSelection;
 
     int usedHeight = [currentGrid_ numberOfLinesUsed];
 
     VT100Grid *copyOfAltGrid = [[altGrid_ copy] autorelease];
     LineBuffer *realLineBuffer = linebuffer_;
 
+    // This is an array of tuples:
+    // [LineBufferPositionRange, iTermSubSelection]
+    NSMutableArray *altScreenSubSelectionTuples = nil;
     LineBufferPosition *originalLastPos = [linebuffer_ lastPosition];
-    LineBufferPosition *originalStartPos = nil;
-    LineBufferPosition *originalEndPos = nil;
     BOOL wasShowingAltScreen = (currentGrid_ == altGrid_);
 
-    if (hasSelection && wasShowingAltScreen) {
+    if (couldHaveSelection && wasShowingAltScreen) {
         // In alternate screen mode, get the original positions of the
         // selection. Later this will be used to set the selection positions
         // relative to the end of the udpated linebuffer (which could change as
         // lines from the base screen are pushed onto it).
-        BOOL ok1, ok2;
         LineBuffer *lineBufferWithAltScreen = [[linebuffer_ newAppendOnlyCopy] autorelease];
         [self appendScreen:currentGrid_
               toScrollback:lineBufferWithAltScreen
             withUsedHeight:usedHeight
                  newHeight:new_height];
-        VT100GridCoordRange selection = [self coordRangeForCurrentSelection];
-
-        [self getNullCorrectedSelectionStartPosition:&originalStartPos
-                                         endPosition:&originalEndPos
-                       selectionStartPositionIsValid:&ok1
-                          selectionEndPostionIsValid:&ok2
-                                        inLineBuffer:lineBufferWithAltScreen
-                                            forRange:selection];
-        hasSelection = ok1 && ok2;
+        altScreenSubSelectionTuples = [NSMutableArray array];
+        for (iTermSubSelection *sub in selection.allSubSelections) {
+            VT100GridCoordRange range = sub.range.coordRange;
+            LineBufferPositionRange *positionRange =
+                [self positionRangeForCoordRange:range
+                                    inLineBuffer:lineBufferWithAltScreen];
+            if (positionRange) {
+                [altScreenSubSelectionTuples addObject:@[ positionRange, sub ]];
+            } else {
+                DLog(@"Failed to get position range for selection on alt screen %@",
+                     VT100GridCoordRangeDescription(range));
+            }
+        }
     }
 
     // If we're in the alternate screen, create a temporary linebuffer and append
@@ -393,22 +401,18 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             VT100GridCoordRange range = [self coordRangeForInterval:note.entry.interval];
             [[note retain] autorelease];
             [intervalTree_ removeObject:note];
-            
-            BOOL ok1, ok2;
-            LineBufferPosition *startPosition = nil;
-            LineBufferPosition *endPosition = nil;
-            
-            [self getNullCorrectedSelectionStartPosition:&startPosition
-                                             endPosition:&endPosition
-                           selectionStartPositionIsValid:&ok1
-                              selectionEndPostionIsValid:&ok2
-                                            inLineBuffer:appendOnlyLineBuffer
-                                                forRange:range];
-            DLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
-                  VT100GridCoordRangeDescription(range),
-                  startPosition,
-                  endPosition);
-            [altScreenNotes addObject:@[ note, startPosition, endPosition ]];
+            LineBufferPositionRange *positionRange =
+                [self positionRangeForCoordRange:range inLineBuffer:appendOnlyLineBuffer];
+            if (positionRange) {
+                DLog(@"Add note on alt screen at %@ (position %@ to %@) to altScreenNotes",
+                     VT100GridCoordRangeDescription(range),
+                     positionRange.start,
+                     positionRange.end);
+                [altScreenNotes addObject:@[ note, positionRange.start, positionRange.end ]];
+            } else {
+                DLog(@"Failed to get position range while in alt screen for note %@ with range %@",
+                     note, VT100GridCoordRangeDescription(range));
+            }
         }
     }
     
@@ -425,12 +429,26 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         withUsedHeight:[primaryGrid_ numberOfLinesUsed]
              newHeight:new_height];
 
-    VT100GridCoordRange newSelection;
-    if (!wasShowingAltScreen && hasSelection) {
-        hasSelection = [self convertRange:[self coordRangeForCurrentSelection]
-                                  toWidth:new_width
-                                       to:&newSelection
-                             inLineBuffer:linebuffer_];
+    // Contains iTermSubSelection*s updated for the new screen size. Used
+    // regardless of whether we were in the alt screen, as it's simply the set
+    // of new sub-selections.
+    NSMutableArray *newSubSelections = [NSMutableArray array];
+    if (!wasShowingAltScreen && couldHaveSelection) {
+        for (iTermSubSelection *sub in selection.allSubSelections) {
+            VT100GridCoordRange newSelection;
+            DLog(@"convert sub %@", sub);
+            BOOL ok = [self convertRange:sub.range.coordRange
+                                 toWidth:new_width
+                                      to:&newSelection
+                            inLineBuffer:linebuffer_];
+            if (ok) {
+                VT100GridWindowedRange theRange = VT100GridWindowedRangeMake(newSelection, 0, 0);
+                iTermSubSelection *theSub =
+                    [iTermSubSelection subSelectionWithRange:theRange mode:sub.selectionMode];
+                theSub.connected = sub.connected;
+                [newSubSelections addObject:theSub];
+            }
+        }
     }
     
     if ([intervalTree_ count]) {
@@ -534,15 +552,26 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             withUsedHeight:usedHeight
                  newHeight:new_height];
 
-        if (hasSelection) {
-            hasSelection = [self computeRangeFromOriginalLimit:originalLastPos
-                                                 limitPosition:newLastPos
-                                                 startPosition:originalStartPos
-                                                   endPosition:originalEndPos
-                                                      newWidth:new_width
-                                                    lineBuffer:appendOnlyLineBuffer
-                                                         range:&newSelection
-                                                  linesMovedUp:linesMovedUp];
+        for (int i = 0; i < altScreenSubSelectionTuples.count; i++) {
+            LineBufferPositionRange *positionRange = altScreenSubSelectionTuples[i][0];
+            iTermSubSelection *originalSub = altScreenSubSelectionTuples[i][2];
+            VT100GridCoordRange newSelection;
+            BOOL ok = [self computeRangeFromOriginalLimit:originalLastPos
+                                            limitPosition:newLastPos
+                                            startPosition:positionRange.start
+                                              endPosition:positionRange.end
+                                                 newWidth:new_width
+                                               lineBuffer:appendOnlyLineBuffer
+                                                    range:&newSelection
+                                             linesMovedUp:linesMovedUp];
+            if (ok) {
+                VT100GridWindowedRange theRange =
+                    VT100GridWindowedRangeMake(newSelection, 0, 0);
+                iTermSubSelection *theSub = [iTermSubSelection subSelectionWithRange:theRange
+                                                                                mode:originalSub.selectionMode];
+                theSub.connected = originalSub.connected;
+                [newSubSelections addObject:theSub];
+            }
         }
         DLog(@"Original limit=%@", originalLastPos);
         DLog(@"New limit=%@", newLastPos);
@@ -638,19 +667,21 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     int lines = [linebuffer_ numLinesWithWidth:currentGrid_.size.width];
     NSAssert(lines >= 0, @"Negative lines");
 
-    // An immediate refresh is needed so that the size of TEXTVIEW can be
+    // An immediate refresh is needed so that the size of textview can be
     // adjusted to fit the new size
     DebugLog(@"resizeWidth setDirty");
     [delegate_ screenNeedsRedraw];
-    if (hasSelection &&
-        newSelection.start.y >= linesDropped &&
-        newSelection.end.y >= linesDropped) {
-        [delegate_ screenSetSelectionFromX:newSelection.start.x
-                                     fromY:newSelection.start.y - linesDropped
-                                       toX:newSelection.end.x
-                                       toY:newSelection.end.y - linesDropped];
-    } else {
-        [delegate_ screenRemoveSelection];
+    [selection clearSelection];
+    if (couldHaveSelection) {
+        for (iTermSubSelection* sub in newSubSelections) {
+            VT100GridCoordRange newSelection = sub.range.coordRange;
+            if (newSelection.start.y >= linesDropped &&
+                newSelection.end.y >= linesDropped) {
+                newSelection.start.y -= linesDropped;
+                newSelection.end.y -= linesDropped;
+                [selection addSubSelection:sub];
+            }
+        }
     }
 
     [self reloadMarkCache];
@@ -723,131 +754,140 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [self reloadMarkCache];
 }
 
-- (void)appendStringAtCursor:(NSString *)string ascii:(BOOL)ascii
+- (void)appendAsciiDataAtCursor:(AsciiData *)asciiData
 {
-    DLog(@"setString: %ld chars starting with %c at x=%d, y=%d, line=%d",
-         (unsigned long)[string length],
-         [string characterAtIndex:0],
+    int len = asciiData->length;
+    if (len < 1 || !asciiData) {
+        return;
+    }
+    STOPWATCH_START(appendAsciiDataAtCursor);
+    char firstChar = asciiData->buffer[0];
+    
+    DLog(@"appendAsciiDataAtCursor: %ld chars starting with %c at x=%d, y=%d, line=%d",
+         (unsigned long)len,
+         firstChar,
          currentGrid_.cursorX,
          currentGrid_.cursorY,
          currentGrid_.cursorY + [linebuffer_ numLinesWithWidth:currentGrid_.size.width]);
 
+    screen_char_t *buffer;
+    buffer = asciiData->screenChars->buffer;
+    
+    screen_char_t fg = [terminal_ foregroundColorCode];
+    screen_char_t bg = [terminal_ backgroundColorCode];
+    screen_char_t zero = { 0 };
+    if (memcmp(&fg, &zero, sizeof(fg)) || memcmp(&bg, &zero, sizeof(bg))) {
+        STOPWATCH_START(setUpScreenCharArray);
+        for (int i = 0; i < len; i++) {
+            CopyForegroundColor(&buffer[i], fg);
+            CopyBackgroundColor(&buffer[i], bg);
+        }
+        STOPWATCH_LAP(setUpScreenCharArray);
+    }
+
+    // If a graphics character set was selected then translate buffer
+    // characters into graphics charaters.
+    if (charsetUsesLineDrawingMode_[[terminal_ charset]]) {
+        ConvertCharsToGraphicsCharset(buffer, len);
+    }
+
+    [self appendScreenCharArrayAtCursor:buffer
+                                 length:len
+                             shouldFree:NO];
+    STOPWATCH_LAP(appendAsciiDataAtCursor);
+}
+
+- (void)appendStringAtCursor:(NSString *)string
+{
     int len = [string length];
     if (len < 1 || !string) {
         return;
     }
+    
+    unichar firstChar =  [string characterAtIndex:0];
+    
+    DLog(@"appendStringAtCursor: %ld chars starting with %c at x=%d, y=%d, line=%d",
+         (unsigned long)len,
+         firstChar,
+         currentGrid_.cursorX,
+         currentGrid_.cursorY,
+         currentGrid_.cursorY + [linebuffer_ numLinesWithWidth:currentGrid_.size.width]);
 
     // Allocate a buffer of screen_char_t and place the new string in it.
     const int kStaticBufferElements = 1024;
     screen_char_t staticBuffer[kStaticBufferElements];
     screen_char_t *dynamicBuffer = 0;
     screen_char_t *buffer;
-    if (ascii) {
-        // Only Unicode code points 0 through 127 occur in the string.
-        const int kStaticTempElements = kStaticBufferElements;
-        unichar staticTemp[kStaticTempElements];
-        unichar* dynamicTemp = 0;
-        unichar *sc;
-        if ([string length] > kStaticTempElements) {
-            dynamicTemp = sc = (unichar *) calloc(len, sizeof(unichar));
-            assert(dynamicTemp);
-        } else {
-            sc = staticTemp;
-        }
-        assert(terminal_);
-        screen_char_t fg = [terminal_ foregroundColorCode];
-        screen_char_t bg = [terminal_ backgroundColorCode];
-
-        if ([string length] > kStaticBufferElements) {
-            buffer = dynamicBuffer = (screen_char_t *) calloc([string length],
-                                                              sizeof(screen_char_t));
-            assert(dynamicBuffer);
-            if (!buffer) {
-                NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
-                return;
-            }
-        } else {
-            buffer = staticBuffer;
-        }
-
-        [string getCharacters:sc];
-        for (int i = 0; i < len; i++) {
-            buffer[i].code = sc[i];
-            buffer[i].complexChar = NO;
-            CopyForegroundColor(&buffer[i], fg);
-            CopyBackgroundColor(&buffer[i], bg);
-            buffer[i].unused = 0;
-        }
-
-        // If a graphics character set was selected then translate buffer
-        // characters into graphics charaters.
-        if (charsetUsesLineDrawingMode_[[terminal_ charset]]) {
-            ConvertCharsToGraphicsCharset(buffer, len);
-        }
-        if (dynamicTemp) {
-            free(dynamicTemp);
+    string = [string precomposedStringWithCanonicalMapping];
+    len = [string length];
+    if (2 * len > kStaticBufferElements) {
+        buffer = dynamicBuffer = (screen_char_t *) calloc(2 * len,
+                                                          sizeof(screen_char_t));
+        assert(buffer);
+        if (!buffer) {
+            NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
+            return;
         }
     } else {
-        string = [string precomposedStringWithCanonicalMapping];
-        len = [string length];
-        if (2 * len > kStaticBufferElements) {
-            buffer = dynamicBuffer = (screen_char_t *) calloc(2 * len,
-                                                              sizeof(screen_char_t));
-            assert(buffer);
-            if (!buffer) {
-                NSLog(@"%s: Out of memory", __PRETTY_FUNCTION__);
-                return;
-            }
-        } else {
-            buffer = staticBuffer;
-        }
-
-        // Pick off leading combining marks and low surrogates and modify the
-        // character at the cursor position with them.
-        unichar firstChar = [string characterAtIndex:0];
-        while ([string length] > 0 &&
-               (IsCombiningMark(firstChar) || IsLowSurrogate(firstChar))) {
-            VT100GridCoord pred = [currentGrid_ coordinateBefore:currentGrid_.cursor];
-            if (pred.x < 0 ||
-                ![currentGrid_ addCombiningChar:firstChar toCoord:pred]) {
-                // Combining mark will need to stand alone rather than combine
-                // because nothing precedes it.
-                if (IsCombiningMark(firstChar)) {
-                    // Prepend a space to it so the combining mark has something
-                    // to combine with.
-                    string = [NSString stringWithFormat:@" %@", string];
-                } else {
-                    // Got a low surrogate but can't find the matching high
-                    // surrogate. Turn the low surrogate into a replacement
-                    // char. This should never happen because decode_string
-                    // ought to detect the broken unicode and substitute a
-                    // replacement char.
-                    string = [NSString stringWithFormat:@"%@%@",
-                              ReplacementString(),
-                              [string substringFromIndex:1]];
-                }
-                len = [string length];
-                break;
-            }
-            string = [string substringFromIndex:1];
-            if ([string length] > 0) {
-                firstChar = [string characterAtIndex:0];
-            }
-        }
-
-        assert(terminal_);
-        // Add DWC_RIGHT after each double-byte character, build complex characters out of surrogates
-        // and combining marks, replace private codes with replacement characters, swallow zero-
-        // width spaces, and set fg/bg colors and attributes.
-        StringToScreenChars(string,
-                            buffer,
-                            [terminal_ foregroundColorCode],
-                            [terminal_ backgroundColorCode],
-                            &len,
-                            [delegate_ screenShouldTreatAmbiguousCharsAsDoubleWidth],
-                            NULL);
+        buffer = staticBuffer;
     }
 
+    // Pick off leading combining marks and low surrogates and modify the
+    // character at the cursor position with them.
+    while ([string length] > 0 &&
+           (IsCombiningMark(firstChar) || IsLowSurrogate(firstChar))) {
+        VT100GridCoord pred = [currentGrid_ coordinateBefore:currentGrid_.cursor];
+        if (pred.x < 0 ||
+            ![currentGrid_ addCombiningChar:firstChar toCoord:pred]) {
+            // Combining mark will need to stand alone rather than combine
+            // because nothing precedes it.
+            if (IsCombiningMark(firstChar)) {
+                // Prepend a space to it so the combining mark has something
+                // to combine with.
+                string = [NSString stringWithFormat:@" %@", string];
+            } else {
+                // Got a low surrogate but can't find the matching high
+                // surrogate. Turn the low surrogate into a replacement
+                // char. This should never happen because decode_string
+                // ought to detect the broken unicode and substitute a
+                // replacement char.
+                string = [NSString stringWithFormat:@"%@%@",
+                          ReplacementString(),
+                          [string substringFromIndex:1]];
+            }
+            len = [string length];
+            break;
+        }
+        string = [string substringFromIndex:1];
+        if ([string length] > 0) {
+            firstChar = [string characterAtIndex:0];
+        }
+    }
+
+    assert(terminal_);
+    // Add DWC_RIGHT after each double-byte character, build complex characters out of surrogates
+    // and combining marks, replace private codes with replacement characters, swallow zero-
+    // width spaces, and set fg/bg colors and attributes.
+    BOOL dwc = NO;
+    StringToScreenChars(string,
+                        buffer,
+                        [terminal_ foregroundColorCode],
+                        [terminal_ backgroundColorCode],
+                        &len,
+                        [delegate_ screenShouldTreatAmbiguousCharsAsDoubleWidth],
+                        NULL,
+                        &dwc);
+    if (dwc) {
+        linebuffer_.mayHaveDoubleWidthCharacter = dwc;
+    }
+    [self appendScreenCharArrayAtCursor:buffer
+                                 length:len
+                             shouldFree:(buffer == dynamicBuffer)];
+}
+
+- (void)appendScreenCharArrayAtCursor:(screen_char_t *)buffer
+                               length:(int)len
+                           shouldFree:(BOOL)shouldFree {
     if (len >= 1) {
         [self incrementOverflowBy:[currentGrid_ appendCharsAtCursor:buffer
                                                              length:len
@@ -859,8 +899,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
                                                              insert:_insert]];
     }
 
-    if (dynamicBuffer) {
-        free(dynamicBuffer);
+    if (shouldFree) {
+        free(buffer);
     }
     
     if (commandStartX_ != -1) {
@@ -935,7 +975,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         [delegate_ screenFlashImage:FlashBell];
     }
     [delegate_ screenIncrementBadge];
-    [delegate_ screenRequestUserAttention:NO];
 }
 
 - (void)setHistory:(NSArray *)history
@@ -948,6 +987,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     // line (excluding empty ones at the end) to the real line buffer.
     [self clearBuffer];
     LineBuffer *temp = [[[LineBuffer alloc] init] autorelease];
+    temp.mayHaveDoubleWidthCharacter = YES;
+    linebuffer_.mayHaveDoubleWidthCharacter = YES;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     for (NSData *chars in history) {
         screen_char_t *line = (screen_char_t *) [chars bytes];
@@ -998,6 +1039,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
 - (void)setAltScreen:(NSArray *)lines
 {
+    linebuffer_.mayHaveDoubleWidthCharacter = YES;
     if (!altGrid_) {
         altGrid_ = [primaryGrid_ copy];
     }
@@ -1456,6 +1498,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     return [currentGrid_ isCharDirtyAt:VT100GridCoordMake(x, y)];
 }
 
+- (NSIndexSet *)dirtyIndexesOnLine:(int)line {
+    return [currentGrid_ dirtyIndexesOnLine:line];
+}
+
 - (void)resetDirty
 {
     [currentGrid_ markAllCharsDirty:NO];
@@ -1808,15 +1854,28 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
 #pragma mark - VT100TerminalDelegate
 
-- (void)terminalAppendString:(NSString *)string isAscii:(BOOL)isAscii
-{
+- (void)terminalAppendString:(NSString *)string {
     if (collectInputForPrinting_) {
         [printBuffer_ appendString:string];
     } else {
         // else display string on screen
-        [self appendStringAtCursor:string ascii:isAscii];
+        [self appendStringAtCursor:string];
     }
     [delegate_ screenDidAppendStringToCurrentLine:string];
+}
+
+- (void)terminalAppendAsciiData:(AsciiData *)asciiData {
+    if (collectInputForPrinting_) {
+        NSString *string = [[[NSString alloc] initWithBytes:asciiData->buffer
+                                                     length:asciiData->length
+                                                   encoding:NSASCIIStringEncoding] autorelease];
+        [self terminalAppendString:string];
+        return;
+    } else {
+        // else display string on screen
+        [self appendAsciiDataAtCursor:asciiData];
+    }
+    [delegate_ screenDidAppendAsciiDataToCurrentLine:asciiData];
 }
 
 - (void)terminalRingBell {
@@ -2067,6 +2126,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     int x1, yStart, x2, y2;
 
     if (before && after) {
+        [delegate_ screenRemoveSelection];
         [self scrollScreenIntoHistory];
         x1 = 0;
         yStart = 0;
@@ -2085,6 +2145,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         if (x1 == 0 && yStart == 0) {
             // Save the whole screen. This helps the "screen" terminal, where CSI H CSI J is used to
             // clear the screen.
+            [delegate_ screenRemoveSelection];
             [self scrollScreenIntoHistory];
         }
     } else {
@@ -2446,6 +2507,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalScrollUp:(int)n {
+    [delegate_ screenRemoveSelection];
     for (int i = 0;
          i < MIN(currentGrid_.size.height, n);
          i++) {
@@ -2457,6 +2519,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalScrollDown:(int)n {
+    [delegate_ screenRemoveSelection];
     [currentGrid_ scrollRect:[currentGrid_ scrollRegionRect]
                       downBy:MIN(currentGrid_.size.height, n)];
     [delegate_ screenTriggerableChangeDidOccur];
@@ -2550,6 +2613,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [delegate_ screenStartTmuxMode];
 }
 
+- (void)terminalHandleTmuxInput:(VT100Token *)token {
+    [delegate_ screenHandleTmuxInput:token];
+}
+
 - (int)terminalWidth {
     return [self width];
 }
@@ -2587,8 +2654,8 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
                                 [self width],
                                 screenOrigin + self.height);
     DLog(@"  moveNotes: looking in range %@", VT100GridCoordRangeDescription(screenRange));
-    Interval *interval = [self intervalForGridCoordRange:screenRange];
-    for (id<IntervalTreeObject> obj in [source objectsInInterval:interval]) {
+    Interval *sourceInterval = [self intervalForGridCoordRange:screenRange];
+    for (id<IntervalTreeObject> obj in [source objectsInInterval:sourceInterval]) {
         Interval *interval = [[obj.entry.interval retain] autorelease];
         [[obj retain] autorelease];
         DLog(@"  found note with interval %@", interval);
@@ -2628,6 +2695,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     if (currentGrid_ == altGrid_) {
         return;
     }
+    [delegate_ screenRemoveSelection];
     if (!altGrid_) {
         altGrid_ = [[VT100Grid alloc] initWithSize:primaryGrid_.size delegate:self];
     }
@@ -2643,6 +2711,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [currentGrid_ markAllCharsDirty:YES];
     [delegate_ screenNeedsRedraw];
     commandStartX_ = commandStartY_ = -1;
+}
+
+- (BOOL)showingAlternateScreen {
+    return currentGrid_ == altGrid_;
 }
 
 - (void)hideOnScreenNotesAndTruncateSpanners
@@ -2667,6 +2739,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 - (void)terminalShowPrimaryBufferRestoringCursor:(BOOL)restore
 {
     if (currentGrid_ == altGrid_) {
+        [delegate_ screenRemoveSelection];
         [self hideOnScreenNotesAndTruncateSpanners];
         currentGrid_ = primaryGrid_;
         commandStartX_ = commandStartY_ = -1;
@@ -2715,6 +2788,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     // used to move the cursor's wrapped line to the top of the screen. It's only used from
     // DECSET 1049, and neither xterm nor terminal have this behavior, and I'm not sure why it
     // would be desirable anyway. Like xterm (and unlike Terminal) we leave the cursor put.
+    [delegate_ screenRemoveSelection];
     [currentGrid_ setCharsFrom:VT100GridCoordMake(0, 0)
                             to:VT100GridCoordMake(currentGrid_.size.width - 1,
                                                   currentGrid_.size.height - 1)
@@ -2728,10 +2802,6 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
         [array addObject:[NSNumber numberWithInt:modifiers[i]]];
     }
     [delegate_ screenModifiersDidChangeTo:array];
-}
-
-- (void)terminalColorTableEntryAtIndex:(int)theIndex didChangeToColor:(NSColor *)theColor {
-    [delegate_ screenSetColorTableEntryAtIndex:theIndex color:theColor];
 }
 
 - (void)terminalSaveScrollPositionWithArgument:(NSString *)argument {
@@ -2860,6 +2930,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
             width = ceil((double)width / cellSize.width);
             break;
             
+        case kVT100TerminalUnitsPercentage:
+            width = [self width];
+            break;
+            
         case kVT100TerminalUnitsCells:
             break;
             
@@ -2874,6 +2948,10 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     switch (heightUnits) {
         case kVT100TerminalUnitsPixels:
             height = ceil((double)height / cellSize.height);
+            break;
+            
+        case kVT100TerminalUnitsPercentage:
+            height = [self height];
             break;
             
         case kVT100TerminalUnitsCells:
@@ -2916,17 +2994,19 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 
     // Allocate cells for the image.
     // TODO: Support scroll regions.
-    int xOffset = self.cursorX;
+    int xOffset = self.cursorX - 1;
     int screenWidth = currentGrid_.size.width;
     screen_char_t c = ImageCharForNewImage(name, width, height, preserveAspectRatio);
     for (int y = 0; y < height; y++) {
+        if (y > 0) {
+            [self linefeed];
+        }
         for (int x = xOffset; x < xOffset + width && x < screenWidth; x++) {
             SetPositionInImageChar(&c, x - xOffset, y);
             [currentGrid_ setCharsFrom:VT100GridCoordMake(x, currentGrid_.cursorY)
                                     to:VT100GridCoordMake(x, currentGrid_.cursorY)
                                 toChar:c];
         }
-        [self linefeed];
     }
     currentGrid_.cursorX = currentGrid_.cursorX + width + 1;
     
@@ -2977,39 +3057,39 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
 }
 
 - (void)terminalRequestAttention:(BOOL)request {
-    [delegate_ screenRequestAttention:request];
+    [delegate_ screenRequestAttention:request isCritical:YES];
 }
 
 - (void)terminalSetForegroundColor:(NSColor *)color {
-    [delegate_ screenSetForegroundColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapForeground];
 }
 
-- (void)terminalSetBackgroundGColor:(NSColor *)color {
-    [delegate_ screenSetBackgroundColor:color];
+- (void)terminalSetBackgroundColor:(NSColor *)color {
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapBackground];
 }
 
 - (void)terminalSetBoldColor:(NSColor *)color {
-    [delegate_ screenSetBoldColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapBold];
 }
 
 - (void)terminalSetSelectionColor:(NSColor *)color {
-    [delegate_ screenSetSelectionColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapSelection];
 }
 
 - (void)terminalSetSelectedTextColor:(NSColor *)color {
-    [delegate_ screenSetSelectedTextColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapSelectedText];
 }
 
 - (void)terminalSetCursorColor:(NSColor *)color {
-    [delegate_ screenSetCursorColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapCursor];
 }
 
 - (void)terminalSetCursorTextColor:(NSColor *)color {
-    [delegate_ screenSetCursorTextColor:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMapCursorText];
 }
 
 - (void)terminalSetColorTableEntryAtIndex:(int)n color:(NSColor *)color {
-    [delegate_ screenSetColorTableEntryAtIndex:n color:color];
+    [[delegate_ screenColorMap] setColor:color forKey:kColorMap8bitBase + n];
 }
 
 - (void)terminalSetCurrentTabColor:(NSColor *)color {
@@ -3044,7 +3124,7 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     [delegate_ screenSetHighlightCursorLine:highlight];
 }
 
-- (void)terminalPromptDidStart; {
+- (void)terminalPromptDidStart {
     // FinalTerm uses this to define the start of a collapsable region. That would be a nightmare
     // to add to iTerm, and our answer to this is marks, which already existed anyway.
     [delegate_ screenAddMarkOnLine:[self numberOfScrollbackLines] + self.cursorY - 1];
@@ -3182,26 +3262,13 @@ static NSString *const kInlineFileBase64String = @"base64 string";  // NSMutable
     NSLog(@"%@", [self debugString]);
 }
 
-- (int)colorCodeForColor:(NSColor *)theColor
-{
-    if (theColor) {
-        theColor = [theColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
-        int r = 5 * [theColor redComponent];
-        int g = 5 * [theColor greenComponent];
-        int b = 5 * [theColor blueComponent];
-        return 16 + b + g*6 + r*36;
-    } else {
-        return 0;
-    }
-}
-
 // Set the color of prototypechar to all chars between startPoint and endPoint on the screen.
 - (void)highlightRun:(VT100GridRun)run
     withForegroundColor:(NSColor *)fgColor
         backgroundColor:(NSColor *)bgColor
 {
-    int fgColorCode = [self colorCodeForColor:fgColor];
-    int bgColorCode = [self colorCodeForColor:bgColor];
+    int fgColorCode = [fgColor nearestIndexIntoAnsi256ColorTable];
+    int bgColorCode = [bgColor nearestIndexIntoAnsi256ColorTable];
 
     screen_char_t fg = { 0 };
     screen_char_t bg = { 0 };
@@ -3313,10 +3380,12 @@ static void SwapInt(int *a, int *b) {
                       toStartX:(VT100GridCoord *)startPtr
                         toEndX:(VT100GridCoord *)endPtr
 {
-    assert(start.x >= 0);
-    assert(end.x >= 0);
-    assert(start.y >= 0);
-    assert(end.y >= 0);
+    if (start.x < 0 || end.x < 0 ||
+        start.y < 0 || end.y < 0) {
+        *startPtr = start;
+        *endPtr = end;
+        return;
+    }
 
     if (!XYIsBeforeXY(start.x, start.y, end.x, end.y)) {
         SwapInt(&start.x, &end.x);
@@ -3350,23 +3419,15 @@ static void SwapInt(int *a, int *b) {
     *endPtr = max;
 }
 
-- (BOOL)getNullCorrectedSelectionStartPosition:(LineBufferPosition **)startPos
-                                   endPosition:(LineBufferPosition **)endPos
-                 selectionStartPositionIsValid:(BOOL *)selectionStartPositionIsValid
-                    selectionEndPostionIsValid:(BOOL *)selectionEndPostionIsValid
-                                  inLineBuffer:(LineBuffer *)lineBuffer
-                                      forRange:(VT100GridCoordRange)range
-{
-    int actualStartX = range.start.x;
-    int actualStartY = range.start.y;
-    int actualEndX = range.end.x;
-    int actualEndY = range.end.y;
-
+- (LineBufferPositionRange *)positionRangeForCoordRange:(VT100GridCoordRange)range
+                                           inLineBuffer:(LineBuffer *)lineBuffer {
+    LineBufferPositionRange *positionRange = [[[LineBufferPositionRange alloc] init] autorelease];
+    
     BOOL endExtends = NO;
     // Use the predecessor of endx,endy so it will have a legal position in the line buffer.
-    if (actualEndX == [self width]) {
-        screen_char_t *line = [self getLineAtIndex:actualEndY];
-        if (line[actualEndX - 1].code == 0 && line[actualEndX].code == EOL_HARD) {
+    if (range.end.x == [self width]) {
+        screen_char_t *line = [self getLineAtIndex:range.end.y];
+        if (line[range.end.x - 1].code == 0 && line[range.end.x].code == EOL_HARD) {
             // The selection goes all the way to the end of the line and there is a null at the
             // end of the line, so it extends to the end of the line. The linebuffer can't recover
             // this from its position because the trailing null in the line wouldn't be in the
@@ -3374,41 +3435,43 @@ static void SwapInt(int *a, int *b) {
             endExtends = YES;
         }
     }
-    actualEndX--;
-    if (actualEndX < 0) {
-        actualEndY--;
-        actualEndX = [self width] - 1;
-        if (actualEndY < 0) {
-            return NO;
+    range.end.x--;
+    if (range.end.x < 0) {
+        range.end.y--;
+        range.end.x = [self width] - 1;
+        if (range.end.y < 0) {
+            return nil;
         }
+    }
+    
+    if (range.start.x < 0 || range.start.y < 0 ||
+        range.end.x < 0 || range.end.y < 0) {
+        return nil;
     }
 
     VT100GridCoord trimmedStart;
     VT100GridCoord trimmedEnd;
-    [self trimSelectionFromStart:VT100GridCoordMake(actualStartX, actualStartY)
-                             end:VT100GridCoordMake(actualEndX, actualEndY)
+    [self trimSelectionFromStart:VT100GridCoordMake(range.start.x, range.start.y)
+                             end:VT100GridCoordMake(range.end.x, range.end.y)
                         toStartX:&trimmedStart
                           toEndX:&trimmedEnd];
-    BOOL endsAfterStart = XYIsBeforeXY(trimmedStart.x, trimmedStart.y, trimmedEnd.x, trimmedEnd.y);
-    if (!endsAfterStart) {
-        return NO;
+    if (VT100GridCoordOrder(trimmedStart, trimmedEnd) == NSOrderedDescending) {
+        return nil;
     }
 
-    *startPos = [lineBuffer positionForCoordinate:trimmedStart
-                                            width:currentGrid_.size.width
-                                           offset:0];
-    if (selectionStartPositionIsValid) {
-        *selectionStartPositionIsValid = (*startPos != nil);
-    }
-    *endPos = [lineBuffer positionForCoordinate:trimmedEnd
-                                          width:currentGrid_.size.width
-                                         offset:0];
-    (*endPos).extendsToEndOfLine = endExtends;
+    positionRange.start = [lineBuffer positionForCoordinate:trimmedStart
+                                                      width:currentGrid_.size.width
+                                                     offset:0];
+    positionRange.end = [lineBuffer positionForCoordinate:trimmedEnd
+                                                    width:currentGrid_.size.width
+                                                   offset:0];
+    positionRange.end.extendsToEndOfLine = endExtends;
 
-    if (selectionEndPostionIsValid) {
-        *selectionEndPostionIsValid = (*endPos != nil);
+    if (positionRange.start && positionRange.end) {
+        return positionRange;
+    } else {
+        return nil;
     }
-    return YES;
 }
 
 - (BOOL)convertRange:(VT100GridCoordRange)range
@@ -3416,40 +3479,43 @@ static void SwapInt(int *a, int *b) {
                   to:(VT100GridCoordRange *)resultPtr
         inLineBuffer:(LineBuffer *)lineBuffer
 {
-    LineBufferPosition *selectionStartPosition;
-    LineBufferPosition *selectionEndPosition;
-    BOOL selectionStartPositionIsValid;
-    BOOL selectionEndPostionIsValid;
+    LineBufferPositionRange *selectionRange;
     
     // Temporarily swap in the passed-in linebuffer so the call below can access lines in the right line buffer.
     LineBuffer *savedLineBuffer = linebuffer_;
     linebuffer_ = lineBuffer;
-    BOOL hasSelection = [self getNullCorrectedSelectionStartPosition:&selectionStartPosition
-                                                         endPosition:&selectionEndPosition
-                                       selectionStartPositionIsValid:&selectionStartPositionIsValid
-                                          selectionEndPostionIsValid:&selectionEndPostionIsValid
-                                                        inLineBuffer:lineBuffer
-                                                            forRange:range];
+    selectionRange = [self positionRangeForCoordRange:range inLineBuffer:lineBuffer];
+    DLog(@"%@ -> %@", VT100GridCoordRangeDescription(range), selectionRange);
     linebuffer_ = savedLineBuffer;
-    if (!hasSelection) {
+    if (!selectionRange) {
+        // One case where this happens is when the start and end of the range are past the last
+        // character in the line buffer (e.g., all nulls). It could occur when a note exists on a
+        // null line.
         return NO;
     }
-    if (selectionStartPositionIsValid) {
-        resultPtr->start = [lineBuffer coordinateForPosition:selectionStartPosition width:newWidth ok:NULL];
-        if (selectionEndPostionIsValid) {
-            VT100GridCoord newEnd = [lineBuffer coordinateForPosition:selectionEndPosition width:newWidth ok:NULL];
-            newEnd.x++;
-            if (newEnd.x > newWidth) {
-                newEnd.y++;
-                newEnd.x -= newWidth;
-            }
-            resultPtr->end = newEnd;
-        } else {
-            resultPtr->end.x = currentGrid_.size.width;
-            resultPtr->end.y = [lineBuffer numLinesWithWidth:newWidth] + currentGrid_.size.height - 1;
+
+    resultPtr->start = [lineBuffer coordinateForPosition:selectionRange.start
+                                                   width:newWidth
+                                                      ok:NULL];
+    BOOL ok = NO;
+    VT100GridCoord newEnd = [lineBuffer coordinateForPosition:selectionRange.end
+                                                        width:newWidth
+                                                           ok:&ok];
+    if (ok) {
+        newEnd.x++;
+        if (newEnd.x > newWidth) {
+            newEnd.y++;
+            newEnd.x -= newWidth;
         }
+        resultPtr->end = newEnd;
+    } else {
+        // I'm not sure how to get here. It would happen if the endpoint of the selection could
+        // be converted into a LineBufferPosition with the original width but that LineBufferPosition
+        // could not be converted back into a VT100GridCoord with the new width.
+        resultPtr->end.x = currentGrid_.size.width;
+        resultPtr->end.y = [lineBuffer numLinesWithWidth:newWidth] + currentGrid_.size.height - 1;
     }
-    if (selectionEndPostionIsValid && selectionEndPosition.extendsToEndOfLine) {
+    if (selectionRange.end.extendsToEndOfLine) {
         resultPtr->end.x = newWidth;
     }
     return YES;
@@ -3461,8 +3527,7 @@ static void SwapInt(int *a, int *b) {
 }
 
 // sets scrollback lines.
-- (void)setMaxScrollbackLines:(unsigned int)lines;
-{
+- (void)setMaxScrollbackLines:(unsigned int)lines {
     maxScrollbackLines_ = lines;
     [linebuffer_ setMaxLines: lines];
     if (!unlimitedScrollback_) {
@@ -3523,7 +3588,7 @@ static void SwapInt(int *a, int *b) {
     DebugLog(@"cursorToX:Y");
 }
 
-- (void)setUseColumnScrollRegion:(BOOL)mode;
+- (void)setUseColumnScrollRegion:(BOOL)mode
 {
     currentGrid_.useScrollRegionCols = mode;
     altGrid_.useScrollRegionCols = mode;
@@ -3645,11 +3710,11 @@ static void SwapInt(int *a, int *b) {
                 // Found a match in the text.
                 NSArray *allPositions = [linebuffer_ convertPositions:context.results
                                                             withWidth:currentGrid_.size.width];
-                int k = 0;
-                for (ResultRange* currentResultRange in context.results) {
+                const int numResults = context.results.count;
+                for (int k = 0; k < numResults; k++) {
                     SearchResult* result = [[SearchResult alloc] init];
 
-                    XYRange* xyrange = [allPositions objectAtIndex:k++];
+                    XYRange* xyrange = [allPositions objectAtIndex:k];
 
                     result->startX = xyrange->xStart;
                     result->endX = xyrange->xEnd;
